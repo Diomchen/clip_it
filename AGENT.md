@@ -9,11 +9,13 @@ and ports.
 
 ## Current Stage
 
-- Greenfield project; the first milestone is a command-line/daemon MVP.
-- One executable should provide discovery, receiving, sending, and OS
-  integration commands.
-- A lightweight loopback web picker is preferred over bundling a large GUI
-  runtime. The operating system context-menu item launches this picker.
+- The command-line/daemon MVP and Windows/macOS packaging pipeline are complete.
+- Protocol v2 includes sender identity, a persistent trusted-device list, and a
+  loopback-only confirmation page for unknown senders.
+- One executable provides discovery, receiving, sending, trust management, and
+  OS integration commands.
+- The next milestone is Windows login startup / macOS LaunchAgent integration
+  and lightweight status UI; do not introduce a bundled browser runtime.
 
 ## Technical Direction
 

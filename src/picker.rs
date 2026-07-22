@@ -1,5 +1,6 @@
 use std::{path::PathBuf, process::Command, time::Duration};
 
+use crate::{config::Identity, discovery::Discovery, transfer::send_paths};
 use anyhow::{Context, Result, bail};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -7,11 +8,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{discovery::Discovery, transfer::send_paths};
-
-pub async fn run(paths: Vec<PathBuf>, own_id: Uuid) -> Result<()> {
+pub async fn run(paths: Vec<PathBuf>, identity: Identity) -> Result<()> {
     let mut peers = Discovery::listen(Duration::from_millis(2200)).await?;
-    peers.retain(|peer| peer.id != own_id);
+    peers.retain(|peer| peer.id != identity.id);
     if peers.is_empty() {
         bail!("未发现设备；请先在接收设备运行 `clip-it serve`");
     }
@@ -42,7 +41,7 @@ pub async fn run(paths: Vec<PathBuf>, own_id: Uuid) -> Result<()> {
                 respond(&mut stream, 404, "text/plain; charset=utf-8", "Not found").await?;
                 continue;
             };
-            match send_paths(peer.addr, &paths).await {
+            match send_paths(peer.addr, &paths, &identity).await {
                 Ok(receipt) => {
                     let body = page(&format!(
                         "发送完成：{} 个文件，{} 字节 → {}",

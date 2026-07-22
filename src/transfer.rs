@@ -1,7 +1,9 @@
 use std::{
     collections::HashSet,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -9,16 +11,22 @@ use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    time,
 };
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    config::AppConfig,
-    protocol::{EntryKind, FileEntry, MAX_MANIFEST_BYTES, Manifest, PROTOCOL_VERSION, Response},
+    config::{AppConfig, Identity, ReceivePolicy, TrustedDevice, TrustedDevices},
+    confirmation::{self, Decision, IncomingSummary},
+    protocol::{
+        EntryKind, FileEntry, MAX_MANIFEST_BYTES, Manifest, PROTOCOL_VERSION, Response,
+        SenderIdentity,
+    },
 };
 
 const BUFFER_SIZE: usize = 1024 * 1024;
+const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
 pub struct TransferReceipt {
@@ -26,7 +34,7 @@ pub struct TransferReceipt {
     pub bytes: u64,
 }
 
-pub async fn receive_loop(config: AppConfig) -> Result<()> {
+pub async fn receive_loop(config: AppConfig, policy: ReceivePolicy) -> Result<()> {
     fs::create_dir_all(&config.download_dir)
         .await
         .context("创建接收目录失败")?;
@@ -34,19 +42,29 @@ pub async fn receive_loop(config: AppConfig) -> Result<()> {
         .await
         .context("绑定文件传输端口失败")?;
     let download_dir = Arc::new(config.download_dir);
+    let trusted_devices = config.trusted_devices;
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let download_dir = Arc::clone(&download_dir);
+        let trusted_devices = trusted_devices.clone();
         tokio::spawn(async move {
-            if let Err(error) = receive_one(stream, &download_dir).await {
+            if let Err(error) =
+                receive_one(stream, peer, &download_dir, policy, &trusted_devices).await
+            {
                 eprintln!("来自 {peer} 的传输失败: {error:#}");
             }
         });
     }
 }
 
-async fn receive_one(mut stream: TcpStream, download_dir: &Path) -> Result<()> {
+async fn receive_one(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    download_dir: &Path,
+    policy: ReceivePolicy,
+    trusted_devices: &TrustedDevices,
+) -> Result<()> {
     stream.set_nodelay(true)?;
     let manifest: Manifest = read_json(&mut stream).await?;
     if manifest.version != PROTOCOL_VERSION {
@@ -61,6 +79,36 @@ async fn receive_one(mut stream: TcpStream, download_dir: &Path) -> Result<()> {
             return Err(error);
         }
     };
+
+    let total_bytes = manifest
+        .files
+        .iter()
+        .try_fold(0_u64, |total, entry| total.checked_add(entry.size))
+        .context("传输总大小溢出")?;
+    let authorized = match authorize_transfer(
+        policy,
+        trusted_devices,
+        &manifest.sender,
+        peer,
+        &manifest.files,
+        total_bytes,
+    )
+    .await
+    {
+        Ok(authorized) => authorized,
+        Err(error) => {
+            send_response(&mut stream, false, "无法完成接收确认", 0, 0).await?;
+            return Err(error);
+        }
+    };
+    if !authorized {
+        send_response(&mut stream, false, "接收端未授权此次传输", 0, 0).await?;
+        println!(
+            "已拒绝来自 {} ({}, {}) 的传输",
+            manifest.sender.name, manifest.sender.id, peer
+        );
+        return Ok(());
+    }
 
     let transfer_root = download_dir.join(format!("Incoming-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&transfer_root).await?;
@@ -126,12 +174,17 @@ async fn receive_one(mut stream: TcpStream, download_dir: &Path) -> Result<()> {
 }
 
 pub async fn send_paths(
-    target: std::net::SocketAddr,
+    target: SocketAddr,
     paths: &[PathBuf],
+    sender: &Identity,
 ) -> Result<TransferReceipt> {
     let sources = build_sources(paths)?;
     let manifest = Manifest {
         version: PROTOCOL_VERSION,
+        sender: SenderIdentity {
+            id: sender.id,
+            name: sender.name.clone(),
+        },
         files: sources.iter().map(|source| source.entry.clone()).collect(),
     };
     let mut stream = TcpStream::connect(target)
@@ -175,6 +228,52 @@ pub async fn send_paths(
         files: response.files,
         bytes: response.bytes,
     })
+}
+
+async fn authorize_transfer(
+    policy: ReceivePolicy,
+    trusted_devices: &TrustedDevices,
+    sender: &SenderIdentity,
+    peer: SocketAddr,
+    files: &[FileEntry],
+    total_bytes: u64,
+) -> Result<bool> {
+    let trusted = trusted_devices.contains(sender.id)?;
+    match policy {
+        ReceivePolicy::AcceptAll => Ok(true),
+        ReceivePolicy::TrustedOnly => Ok(trusted),
+        ReceivePolicy::Confirm if trusted => Ok(true),
+        ReceivePolicy::Confirm => {
+            let paths = files
+                .iter()
+                .map(|entry| entry.relative_path.clone())
+                .collect::<Vec<_>>();
+            let decision = time::timeout(
+                CONFIRMATION_TIMEOUT,
+                confirmation::prompt(IncomingSummary {
+                    sender,
+                    peer,
+                    files: files.len(),
+                    bytes: total_bytes,
+                    paths: &paths,
+                }),
+            )
+            .await
+            .context("接收确认超时")??;
+            match decision {
+                Decision::AcceptOnce => Ok(true),
+                Decision::TrustAndAccept => {
+                    trusted_devices.add(TrustedDevice {
+                        id: sender.id,
+                        name: sender.name.clone(),
+                    })?;
+                    println!("已将 {} ({}) 加入可信设备列表", sender.name, sender.id);
+                    Ok(true)
+                }
+                Decision::Reject => Ok(false),
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -256,11 +355,26 @@ fn protocol_path(path: &Path) -> String {
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<Vec<PathBuf>> {
+    let sender_name = manifest.sender.name.trim();
+    if manifest.sender.id.is_nil()
+        || sender_name.is_empty()
+        || sender_name.chars().count() > 128
+        || sender_name.chars().any(char::is_control)
+    {
+        bail!("发送端身份无效");
+    }
     if manifest.files.is_empty() {
         bail!("清单为空");
     }
     if manifest.files.len() > 100_000 {
         bail!("文件数量超过限制");
+    }
+    if manifest
+        .files
+        .iter()
+        .any(|entry| entry.kind == EntryKind::Directory && entry.size != 0)
+    {
+        bail!("目录条目的大小必须为 0");
     }
 
     manifest
@@ -342,5 +456,22 @@ mod tests {
             safe_protocol_path("photos/2026/pic.jpg").unwrap(),
             PathBuf::from("photos").join("2026").join("pic.jpg")
         );
+    }
+
+    #[test]
+    fn rejects_invalid_sender_identity() {
+        let manifest = Manifest {
+            version: PROTOCOL_VERSION,
+            sender: SenderIdentity {
+                id: Uuid::nil(),
+                name: "".into(),
+            },
+            files: vec![FileEntry {
+                relative_path: "ok.txt".into(),
+                size: 1,
+                kind: EntryKind::File,
+            }],
+        };
+        assert!(validate_manifest(&manifest).is_err());
     }
 }

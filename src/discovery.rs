@@ -45,8 +45,12 @@ impl Discovery {
         })?;
 
         loop {
-            socket.send_to(&payload, target).await?;
-            time::sleep(Duration::from_secs(1)).await;
+            if let Err(error) = socket.send_to(&payload, target).await {
+                eprintln!("发送设备发现广播失败，将重试: {error}");
+                time::sleep(Duration::from_secs(5)).await;
+            } else {
+                time::sleep(Duration::from_secs(1)).await;
+            }
         }
     }
 

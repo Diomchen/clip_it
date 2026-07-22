@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
-pub const DISCOVERY_MAGIC: &str = "CLIPIT_DISCOVERY_V1";
+pub const PROTOCOL_VERSION: u16 = 2;
+pub const DISCOVERY_MAGIC: &str = "CLIPIT_DISCOVERY_V2";
 pub const DISCOVERY_GROUP: &str = "239.255.42.89";
 pub const DISCOVERY_PORT: u16 = 42_489;
 pub const TRANSFER_PORT: u16 = 42_490;
@@ -20,7 +20,14 @@ pub struct Announcement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u16,
+    pub sender: SenderIdentity,
     pub files: Vec<FileEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SenderIdentity {
+    pub id: Uuid,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
