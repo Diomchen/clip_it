@@ -1,0 +1,53 @@
+# ClipIt Project Memory
+
+## Purpose
+
+ClipIt is a small, fast Rust LAN file-transfer tool designed around the native
+file-manager context menu on Windows and macOS. It must coexist with Synergy 3
+and LocalSend by using its own process names, configuration, discovery marker,
+and ports.
+
+## Current Stage
+
+- Greenfield project; the first milestone is a command-line/daemon MVP.
+- One executable should provide discovery, receiving, sending, and OS
+  integration commands.
+- A lightweight loopback web picker is preferred over bundling a large GUI
+  runtime. The operating system context-menu item launches this picker.
+
+## Technical Direction
+
+- Rust stable with Cargo.
+- Tokio for asynchronous networking and file I/O.
+- Dedicated ClipIt discovery and transfer ports; do not reuse LocalSend or
+  Synergy protocols, service names, or configuration locations.
+- Bind the transfer service on LAN interfaces, but bind any picker/control UI
+  only to loopback.
+- Treat all peers and filenames as untrusted input. Prevent path traversal and
+  write incomplete data to temporary files before atomic rename.
+
+## Expected Commands
+
+- `cargo build` / `cargo build --release`
+- `cargo test`
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+## Maintenance Guide
+
+- Protocol types and framing belong in a small protocol module.
+- LAN discovery belongs in a discovery module.
+- File sending/receiving belongs in a transfer module.
+- Windows and macOS context-menu integration belongs in platform-specific
+  modules and must be idempotent.
+- Never commit certificates, pairing secrets, or machine-specific paths.
+
+## Security and Performance Positioning
+
+- ClipIt targets trusted private LANs and intentionally keeps file payloads
+  unencrypted to minimize CPU work, protocol overhead, and implementation size.
+- Keep BLAKE3 integrity checks, strict path validation, temporary-file writes,
+  and loopback-only control UI enabled.
+- A future lightweight device allowlist or confirmation mechanism may prevent
+  accidental transfers, but transport encryption is not on the roadmap unless
+  the product requirements change.
