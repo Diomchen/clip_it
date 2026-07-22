@@ -1,10 +1,14 @@
+mod clipboard;
 mod config;
 mod confirmation;
 mod discovery;
 mod integration;
 mod picker;
 mod protocol;
+mod settings_ui;
 mod transfer;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod tray;
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -29,8 +33,8 @@ enum Command {
     /// Run the receiver and advertise this device on the LAN.
     Serve {
         /// How incoming transfers from untrusted devices are handled.
-        #[arg(long, value_enum, default_value_t = ReceivePolicy::Confirm)]
-        receive_policy: ReceivePolicy,
+        #[arg(long, value_enum)]
+        receive_policy: Option<ReceivePolicy>,
     },
     /// List ClipIt devices visible on the LAN.
     Devices {
@@ -61,6 +65,13 @@ enum Command {
         #[command(subcommand)]
         action: TrustAction,
     },
+    /// Open the loopback-only settings page.
+    Configure,
+    /// Manage login startup for the tray application.
+    Startup {
+        #[command(subcommand)]
+        action: StartupAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,14 +100,24 @@ enum TrustAction {
     Clear,
 }
 
+#[derive(Debug, Subcommand)]
+enum StartupAction {
+    Install,
+    Remove,
+    Status,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = AppConfig::load_or_create()?;
 
     match cli.command {
-        None => serve(config, ReceivePolicy::Confirm).await?,
-        Some(Command::Serve { receive_policy }) => serve(config, receive_policy).await?,
+        None => run_default(config).await?,
+        Some(Command::Serve { receive_policy }) => {
+            let policy = receive_policy.unwrap_or(config.settings.receive_policy);
+            serve(config, policy).await?;
+        }
         Some(Command::Devices { timeout }) => {
             let peers = discover(Duration::from_secs(timeout), config.identity.id).await?;
             if peers.is_empty() {
@@ -121,6 +142,8 @@ async fn main() -> Result<()> {
             IntegrationAction::Remove => integration::remove()?,
         },
         Some(Command::Trust { action }) => manage_trust(&config, action)?,
+        Some(Command::Configure) => settings_ui::run(config).await?,
+        Some(Command::Startup { action }) => manage_startup(action)?,
     }
 
     Ok(())
@@ -132,8 +155,62 @@ async fn serve(config: AppConfig, policy: ReceivePolicy) -> Result<()> {
         config.device_name,
         config.listen_addr()
     );
+    let clipboard = clipboard::ClipboardBridge::new();
+    if config.settings.clipboard_sync {
+        clipboard::start(config.clone(), clipboard.clone())?;
+        println!("文本及文件剪贴板自动同步已开启");
+    }
     let discovery = Discovery::new(config.identity.clone())?;
-    tokio::try_join!(discovery.run_announcer(), receive_loop(config, policy))?;
+    tokio::try_join!(
+        discovery.run_announcer(),
+        receive_loop(config, policy, clipboard)
+    )?;
+    Ok(())
+}
+
+async fn run_default(config: AppConfig) -> Result<()> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        #[cfg(target_os = "windows")]
+        detach_windows_console();
+        tray::run(config)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let policy = config.settings.receive_policy;
+        serve(config, policy).await
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detach_windows_console() {
+    unsafe extern "system" {
+        fn FreeConsole() -> i32;
+    }
+    unsafe {
+        FreeConsole();
+    }
+}
+
+fn manage_startup(action: StartupAction) -> Result<()> {
+    match action {
+        StartupAction::Install => {
+            integration::startup_install()?;
+            println!("已启用登录时自动启动 ClipIt");
+        }
+        StartupAction::Remove => {
+            integration::startup_remove()?;
+            println!("已关闭登录时自动启动 ClipIt");
+        }
+        StartupAction::Status => println!(
+            "登录启动：{}",
+            if integration::startup_enabled() {
+                "已启用"
+            } else {
+                "未启用"
+            }
+        ),
+    }
     Ok(())
 }
 

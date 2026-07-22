@@ -10,12 +10,12 @@ and ports.
 ## Current Stage
 
 - The command-line/daemon MVP and Windows/macOS packaging pipeline are complete.
-- Protocol v2 includes sender identity, a persistent trusted-device list, and a
+- Protocol v3 includes sender identity, a persistent trusted-device list, and a
   loopback-only confirmation page for unknown senders.
-- One executable provides discovery, receiving, sending, trust management, and
-  OS integration commands.
-- The next milestone is Windows login startup / macOS LaunchAgent integration
-  and lightweight status UI; do not introduce a bundled browser runtime.
+- The desktop executable provides a Windows tray / macOS menu-bar controller,
+  login startup, loopback settings, and automatic text/file clipboard sync.
+- The next milestone is resumable and parallel transfers plus throughput
+  benchmarks; do not introduce a bundled browser runtime.
 
 ## Technical Direction
 

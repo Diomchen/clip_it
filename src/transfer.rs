@@ -17,11 +17,12 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
+    clipboard::ClipboardBridge,
     config::{AppConfig, Identity, ReceivePolicy, TrustedDevice, TrustedDevices},
     confirmation::{self, Decision, IncomingSummary},
     protocol::{
-        EntryKind, FileEntry, MAX_MANIFEST_BYTES, Manifest, PROTOCOL_VERSION, Response,
-        SenderIdentity,
+        ClipboardText, EntryKind, FileEntry, MAX_CLIPBOARD_TEXT_BYTES, MAX_MANIFEST_BYTES,
+        Manifest, PROTOCOL_VERSION, Request, Response, SenderIdentity, TransferIntent,
     },
 };
 
@@ -34,7 +35,11 @@ pub struct TransferReceipt {
     pub bytes: u64,
 }
 
-pub async fn receive_loop(config: AppConfig, policy: ReceivePolicy) -> Result<()> {
+pub async fn receive_loop(
+    config: AppConfig,
+    policy: ReceivePolicy,
+    clipboard: ClipboardBridge,
+) -> Result<()> {
     fs::create_dir_all(&config.download_dir)
         .await
         .context("创建接收目录失败")?;
@@ -48,9 +53,17 @@ pub async fn receive_loop(config: AppConfig, policy: ReceivePolicy) -> Result<()
         let (stream, peer) = listener.accept().await?;
         let download_dir = Arc::clone(&download_dir);
         let trusted_devices = trusted_devices.clone();
+        let clipboard = clipboard.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                receive_one(stream, peer, &download_dir, policy, &trusted_devices).await
+            if let Err(error) = receive_one(
+                stream,
+                peer,
+                &download_dir,
+                policy,
+                &trusted_devices,
+                &clipboard,
+            )
+            .await
             {
                 eprintln!("来自 {peer} 的传输失败: {error:#}");
             }
@@ -64,9 +77,38 @@ async fn receive_one(
     download_dir: &Path,
     policy: ReceivePolicy,
     trusted_devices: &TrustedDevices,
+    clipboard: &ClipboardBridge,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
-    let manifest: Manifest = read_json(&mut stream).await?;
+    let request: Request = read_json(&mut stream).await?;
+    match request {
+        Request::FileTransfer(manifest) => {
+            receive_files(
+                stream,
+                peer,
+                download_dir,
+                policy,
+                trusted_devices,
+                clipboard,
+                manifest,
+            )
+            .await
+        }
+        Request::ClipboardText(message) => {
+            receive_clipboard_text(stream, peer, clipboard, message).await
+        }
+    }
+}
+
+async fn receive_files(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    download_dir: &Path,
+    policy: ReceivePolicy,
+    trusted_devices: &TrustedDevices,
+    clipboard: &ClipboardBridge,
+    manifest: Manifest,
+) -> Result<()> {
     if manifest.version != PROTOCOL_VERSION {
         send_response(&mut stream, false, "协议版本不兼容", 0, 0).await?;
         bail!("unsupported protocol version {}", manifest.version);
@@ -85,16 +127,19 @@ async fn receive_one(
         .iter()
         .try_fold(0_u64, |total, entry| total.checked_add(entry.size))
         .context("传输总大小溢出")?;
-    let authorized = match authorize_transfer(
-        policy,
-        trusted_devices,
-        &manifest.sender,
-        peer,
-        &manifest.files,
-        total_bytes,
-    )
-    .await
-    {
+    let authorized = match if manifest.intent == TransferIntent::Clipboard {
+        Ok(true)
+    } else {
+        authorize_transfer(
+            policy,
+            trusted_devices,
+            &manifest.sender,
+            peer,
+            &manifest.files,
+            total_bytes,
+        )
+        .await
+    } {
         Ok(authorized) => authorized,
         Err(error) => {
             send_response(&mut stream, false, "无法完成接收确认", 0, 0).await?;
@@ -111,6 +156,11 @@ async fn receive_one(
     }
 
     let transfer_root = download_dir.join(format!("Incoming-{}", Uuid::new_v4().simple()));
+    let clipboard_paths = if manifest.intent == TransferIntent::Clipboard {
+        clipboard_root_paths(&transfer_root, &safe_entries)
+    } else {
+        Vec::new()
+    };
     fs::create_dir_all(&transfer_root).await?;
     send_response(&mut stream, true, "ready", 0, 0).await?;
 
@@ -118,7 +168,7 @@ async fn receive_one(
     let mut received_files = 0_u64;
     let mut received_bytes = 0_u64;
 
-    for (entry, relative_path) in manifest.files.iter().zip(safe_entries) {
+    for (entry, relative_path) in manifest.files.iter().zip(&safe_entries) {
         let destination = transfer_root.join(relative_path);
         match entry.kind {
             EntryKind::Directory => fs::create_dir_all(&destination).await?,
@@ -170,6 +220,49 @@ async fn receive_one(
         received_bytes,
         transfer_root.display()
     );
+    if !clipboard_paths.is_empty() {
+        if let Err(error) = clipboard.apply_files(&clipboard_paths) {
+            eprintln!("文件已接收，但写入系统剪贴板失败: {error:#}");
+        } else {
+            println!("已将接收的文件写入系统剪贴板，可直接粘贴");
+        }
+    }
+    Ok(())
+}
+
+async fn receive_clipboard_text(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    clipboard: &ClipboardBridge,
+    message: ClipboardText,
+) -> Result<()> {
+    if message.version != PROTOCOL_VERSION {
+        send_response(&mut stream, false, "协议版本不兼容", 0, 0).await?;
+        bail!("unsupported protocol version {}", message.version);
+    }
+    if let Err(error) = validate_sender(&message.sender) {
+        send_response(&mut stream, false, &error.to_string(), 0, 0).await?;
+        return Err(error);
+    }
+    if message.event_id.is_nil() || message.text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        send_response(&mut stream, false, "剪贴板内容无效或过大", 0, 0).await?;
+        bail!("invalid clipboard text message");
+    }
+    clipboard.apply_text(&message.text)?;
+    send_response(
+        &mut stream,
+        true,
+        "clipboard updated",
+        0,
+        message.text.len() as u64,
+    )
+    .await?;
+    println!(
+        "已同步来自 {} ({}) 的文本剪贴板（{} 字节）",
+        message.sender.name,
+        peer,
+        message.text.len()
+    );
     Ok(())
 }
 
@@ -178,20 +271,27 @@ pub async fn send_paths(
     paths: &[PathBuf],
     sender: &Identity,
 ) -> Result<TransferReceipt> {
+    send_paths_with_intent(target, paths, sender, TransferIntent::Manual).await
+}
+
+pub async fn send_paths_with_intent(
+    target: SocketAddr,
+    paths: &[PathBuf],
+    sender: &Identity,
+    intent: TransferIntent,
+) -> Result<TransferReceipt> {
     let sources = build_sources(paths)?;
     let manifest = Manifest {
         version: PROTOCOL_VERSION,
-        sender: SenderIdentity {
-            id: sender.id,
-            name: sender.name.clone(),
-        },
+        sender: sender_identity(sender),
+        intent,
         files: sources.iter().map(|source| source.entry.clone()).collect(),
     };
     let mut stream = TcpStream::connect(target)
         .await
         .with_context(|| format!("连接 {target} 失败"))?;
     stream.set_nodelay(true)?;
-    write_json(&mut stream, &manifest).await?;
+    write_json(&mut stream, &Request::FileTransfer(manifest)).await?;
 
     let response: Response = read_json(&mut stream).await?;
     if !response.ok {
@@ -228,6 +328,41 @@ pub async fn send_paths(
         files: response.files,
         bytes: response.bytes,
     })
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub async fn send_clipboard_text(
+    target: SocketAddr,
+    text: &str,
+    event_id: Uuid,
+    sender: &Identity,
+) -> Result<()> {
+    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        bail!("文本剪贴板超过 1 MiB 限制");
+    }
+    let message = ClipboardText {
+        version: PROTOCOL_VERSION,
+        sender: sender_identity(sender),
+        event_id,
+        text: text.to_owned(),
+    };
+    let mut stream = TcpStream::connect(target)
+        .await
+        .with_context(|| format!("连接 {target} 失败"))?;
+    stream.set_nodelay(true)?;
+    write_json(&mut stream, &Request::ClipboardText(message)).await?;
+    let response: Response = read_json(&mut stream).await?;
+    if !response.ok {
+        bail!("接收端拒绝剪贴板同步: {}", response.message);
+    }
+    Ok(())
+}
+
+fn sender_identity(sender: &Identity) -> SenderIdentity {
+    SenderIdentity {
+        id: sender.id,
+        name: sender.name.clone(),
+    }
 }
 
 async fn authorize_transfer(
@@ -355,14 +490,7 @@ fn protocol_path(path: &Path) -> String {
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<Vec<PathBuf>> {
-    let sender_name = manifest.sender.name.trim();
-    if manifest.sender.id.is_nil()
-        || sender_name.is_empty()
-        || sender_name.chars().count() > 128
-        || sender_name.chars().any(char::is_control)
-    {
-        bail!("发送端身份无效");
-    }
+    validate_sender(&manifest.sender)?;
     if manifest.files.is_empty() {
         bail!("清单为空");
     }
@@ -382,6 +510,33 @@ fn validate_manifest(manifest: &Manifest) -> Result<Vec<PathBuf>> {
         .iter()
         .map(|entry| safe_protocol_path(&entry.relative_path))
         .collect()
+}
+
+fn validate_sender(sender: &SenderIdentity) -> Result<()> {
+    let sender_name = sender.name.trim();
+    if sender.id.is_nil()
+        || sender_name.is_empty()
+        || sender_name.chars().count() > 128
+        || sender_name.chars().any(char::is_control)
+    {
+        bail!("发送端身份无效");
+    }
+    Ok(())
+}
+
+fn clipboard_root_paths(transfer_root: &Path, safe_entries: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for path in safe_entries {
+        let Some(root) = path.components().next() else {
+            continue;
+        };
+        let root = PathBuf::from(root.as_os_str());
+        if seen.insert(root.clone()) {
+            roots.push(transfer_root.join(root));
+        }
+    }
+    roots
 }
 
 fn safe_protocol_path(value: &str) -> Result<PathBuf> {
@@ -466,6 +621,7 @@ mod tests {
                 id: Uuid::nil(),
                 name: "".into(),
             },
+            intent: TransferIntent::Manual,
             files: vec![FileEntry {
                 relative_path: "ok.txt".into(),
                 size: 1,
@@ -473,5 +629,19 @@ mod tests {
             }],
         };
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn clipboard_paths_include_each_selected_root_once() {
+        let root = Path::new("/downloads/Incoming-test");
+        let paths = vec![
+            PathBuf::from("folder"),
+            PathBuf::from("folder/a.txt"),
+            PathBuf::from("single.bin"),
+        ];
+        assert_eq!(
+            clipboard_root_paths(root, &paths),
+            vec![root.join("folder"), root.join("single.bin")]
+        );
     }
 }

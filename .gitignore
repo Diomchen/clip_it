@@ -2,4 +2,5 @@
 /.target/
 /.target-clipit/
 /dist/
+.DS_Store
 *.clipit-part

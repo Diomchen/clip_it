@@ -22,10 +22,30 @@ pub struct Identity {
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
+    pub config_dir: PathBuf,
     pub identity: Identity,
     pub device_name: String,
     pub download_dir: PathBuf,
+    pub settings: Settings,
     pub trusted_devices: TrustedDevices,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Settings {
+    pub transfer_port: u16,
+    pub receive_policy: ReceivePolicy,
+    pub clipboard_sync: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            transfer_port: TRANSFER_PORT,
+            receive_policy: ReceivePolicy::Confirm,
+            clipboard_sync: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ValueEnum, PartialEq, Eq)]
@@ -65,7 +85,7 @@ impl AppConfig {
             .context("无法确定用户配置目录")?;
         let identity_path = config_dir.join("identity.json");
 
-        let identity = if identity_path.exists() {
+        let mut identity = if identity_path.exists() {
             let bytes = fs::read(&identity_path).context("读取 ClipIt 身份配置失败")?;
             serde_json::from_slice(&bytes).context("ClipIt 身份配置格式错误")?
         } else {
@@ -89,6 +109,19 @@ impl AppConfig {
             identity
         };
 
+        let settings_path = config_dir.join("settings.json");
+        let settings = if settings_path.exists() {
+            let bytes = fs::read(&settings_path).context("读取 ClipIt 设置失败")?;
+            serde_json::from_slice::<Settings>(&bytes).context("ClipIt 设置格式错误")?
+        } else {
+            Settings {
+                transfer_port: identity.transfer_port,
+                ..Settings::default()
+            }
+        };
+        validate_settings(&settings)?;
+        identity.transfer_port = settings.transfer_port;
+
         let download_dir = std::env::var_os("CLIP_IT_DOWNLOAD_DIR")
             .map(PathBuf::from)
             .or_else(|| {
@@ -100,9 +133,11 @@ impl AppConfig {
         let trusted_devices = TrustedDevices::load(config_dir.join("trusted-devices.json"))?;
 
         Ok(Self {
+            config_dir,
             device_name: identity.name.clone(),
             identity,
             download_dir,
+            settings,
             trusted_devices,
         })
     }
@@ -113,6 +148,29 @@ impl AppConfig {
             self.identity.transfer_port,
         )
     }
+
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        validate_settings(settings)?;
+        fs::create_dir_all(&self.config_dir).context("创建 ClipIt 配置目录失败")?;
+        fs::write(
+            self.config_dir.join("settings.json"),
+            serde_json::to_vec_pretty(settings)?,
+        )
+        .context("保存 ClipIt 设置失败")
+    }
+}
+
+fn validate_settings(settings: &Settings) -> Result<()> {
+    if settings.transfer_port == 0
+        || [
+            crate::protocol::DISCOVERY_PORT,
+            crate::protocol::TRAY_INSTANCE_PORT,
+        ]
+        .contains(&settings.transfer_port)
+    {
+        bail!("传输端口必须为 1-65535，且不能使用 ClipIt 保留端口");
+    }
+    Ok(())
 }
 
 impl TrustedDevices {
@@ -244,5 +302,24 @@ mod tests {
         assert!(reloaded.remove(id).unwrap());
         assert!(!reloaded.remove(id).unwrap());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_reserved_transfer_ports() {
+        let settings = Settings {
+            transfer_port: 0,
+            ..Settings::default()
+        };
+        assert!(validate_settings(&settings).is_err());
+        let settings = Settings {
+            transfer_port: crate::protocol::DISCOVERY_PORT,
+            ..Settings::default()
+        };
+        assert!(validate_settings(&settings).is_err());
+        let settings = Settings {
+            transfer_port: crate::protocol::TRAY_INSTANCE_PORT,
+            ..Settings::default()
+        };
+        assert!(validate_settings(&settings).is_err());
     }
 }

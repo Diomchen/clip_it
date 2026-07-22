@@ -50,6 +50,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-x86_64
+      - name: Test Windows target
+        run: cargo test --all-targets --all-features --locked
       - name: Build Windows package
         shell: pwsh
         run: ./scripts/package-windows.ps1
@@ -82,6 +84,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-universal
+      - name: Test macOS target
+        run: cargo test --all-targets --all-features --locked
       - name: Import Apple signing certificate
         if: env.MACOS_CERTIFICATE_BASE64 != ''
         shell: bash

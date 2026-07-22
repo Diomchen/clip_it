@@ -54,6 +54,55 @@ pub fn remove() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+pub fn startup_install() -> Result<()> {
+    let executable = env::current_exe().context("无法确定 ClipIt 可执行文件路径")?;
+    let command = format!("\"{}\"", executable.display());
+    reg(&[
+        "add",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        "/v",
+        "ClipIt",
+        "/d",
+        &command,
+        "/f",
+    ])?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn startup_remove() -> Result<()> {
+    if !startup_enabled() {
+        return Ok(());
+    }
+    let status = Command::new("reg")
+        .args([
+            "delete",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "ClipIt",
+            "/f",
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("移除 Windows 登录启动项失败");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn startup_enabled() -> bool {
+    Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "ClipIt",
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "windows")]
 fn reg(args: &[&str]) -> Result<()> {
     let status = Command::new("reg").args(args).status()?;
     if !status.success() {
@@ -127,6 +176,48 @@ pub fn remove() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn startup_install() -> Result<()> {
+    let executable = std::env::current_exe().context("无法确定 ClipIt 可执行文件路径")?;
+    let path = launch_agent_path()?;
+    let parent = path.parent().context("LaunchAgent 路径无效")?;
+    fs::create_dir_all(parent).context("创建 LaunchAgents 目录失败")?;
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.clip-it.agent</string>
+<key>ProgramArguments</key><array><string>{}</string></array>
+<key>RunAtLoad</key><true/>
+<key>ProcessType</key><string>Interactive</string>
+</dict></plist>"#,
+        xml_escape(executable.to_string_lossy().as_ref())
+    );
+    fs::write(path, plist).context("写入 macOS 登录启动项失败")?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn startup_remove() -> Result<()> {
+    let path = launch_agent_path()?;
+    if path.exists() {
+        fs::remove_file(path).context("移除 macOS 登录启动项失败")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn startup_enabled() -> bool {
+    launch_agent_path().is_ok_and(|path| path.exists())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
+        .context("无法确定用户主目录")?
+        .join("Library/LaunchAgents/dev.clip-it.agent.plist"))
+}
+
+#[cfg(target_os = "macos")]
 fn services_dir() -> Result<PathBuf> {
     Ok(dirs::home_dir()
         .context("无法确定用户主目录")?
@@ -155,4 +246,19 @@ pub fn install() -> Result<()> {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn remove() -> Result<()> {
     bail!("当前仅支持 Windows/macOS 文件管理器集成")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn startup_install() -> Result<()> {
+    bail!("当前仅支持 Windows/macOS 登录启动")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn startup_remove() -> Result<()> {
+    bail!("当前仅支持 Windows/macOS 登录启动")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn startup_enabled() -> bool {
+    false
 }
