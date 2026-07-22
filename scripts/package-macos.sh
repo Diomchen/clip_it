@@ -78,10 +78,9 @@ cat > "$WORK_DIR/dmg/安装说明.txt" <<'EOF'
 ClipIt 安装说明
 
 1. 把 ClipIt.app 拖入 Applications（应用程序）文件夹。
-2. 双击 ClipIt.app 启动局域网接收服务。
-3. 在“终端”执行以下命令，安装 Finder 右键快速操作：
-
-   /Applications/ClipIt.app/Contents/MacOS/clip-it integrate install
+2. 双击 ClipIt.app。应用会自动安装 Finder 右键快速操作、启用登录启动，
+   并在菜单栏运行，无需执行终端命令。
+3. 在 Finder 中右键文件，选择“快速操作 → 使用 ClipIt 发送”。
 
 卸载 Finder 快速操作：
 

@@ -54,11 +54,8 @@ macOS 在本机生成 DMG（默认生成当前 CPU 架构）：
 ```
 
 生成的 `dist/ClipIt-<版本>-macos-<架构>.dmg` 内含 `ClipIt.app` 和应用程序目录
-快捷方式。把应用拖到 Applications 后，双击即可启动接收服务，再执行：
-
-```bash
-/Applications/ClipIt.app/Contents/MacOS/clip-it integrate install
-```
+快捷方式。把应用拖到 Applications 后双击，程序会自动安装 Finder 右键快速操作、
+启用登录启动并进入菜单栏，无需执行终端命令。
 
 Windows 可在 PowerShell 中运行 `./scripts/package-windows.ps1`，生成独立 EXE、ZIP
 和 SHA-256 校验文件。所有安装包都在 `dist/` 下；未配置代码签名的构建为未签名
@@ -86,8 +83,9 @@ git push origin v0.3.0
 
 ## 使用
 
-直接启动 `clip-it` 或双击 `ClipIt.app` 会进入托盘/菜单栏模式，并自动启动后台
-接收服务。菜单中可以查看状态、打开接收目录、重启服务、修改设置和配置登录启动。
+直接启动 `clip-it` 或双击 `ClipIt.app` 会自动安装文件右键菜单、启用登录启动，
+进入托盘/菜单栏模式并启动后台接收服务。菜单中可以查看状态、打开接收目录、
+重启服务、修改设置和配置登录启动。
 
 需要在终端以前台方式运行时使用：
 

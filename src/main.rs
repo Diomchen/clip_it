@@ -173,6 +173,12 @@ async fn run_default(config: AppConfig) -> Result<()> {
     {
         #[cfg(target_os = "windows")]
         detach_windows_console();
+        if let Err(error) = integration::install() {
+            eprintln!("安装文件右键菜单失败: {error:#}");
+        }
+        if let Err(error) = integration::startup_install() {
+            eprintln!("启用登录启动失败: {error:#}");
+        }
         tray::run(config)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
