@@ -5,7 +5,11 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::{fs, path::PathBuf};
 
-use anyhow::{Context, Result, bail};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(not(target_os = "macos"))]
+use anyhow::bail;
 
 #[cfg(target_os = "windows")]
 pub fn install() -> Result<()> {

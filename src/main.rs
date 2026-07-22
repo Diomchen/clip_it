@@ -20,7 +20,7 @@ use crate::{
 #[command(version, about)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -65,16 +65,8 @@ async fn main() -> Result<()> {
     let config = AppConfig::load_or_create()?;
 
     match cli.command {
-        Command::Serve => {
-            println!(
-                "ClipIt {} 正在监听 {}",
-                config.device_name,
-                config.listen_addr()
-            );
-            let discovery = Discovery::new(config.identity.clone())?;
-            tokio::try_join!(discovery.run_announcer(), receive_loop(config))?;
-        }
-        Command::Devices { timeout } => {
+        None | Some(Command::Serve) => serve(config).await?,
+        Some(Command::Devices { timeout }) => {
             let peers = discover(Duration::from_secs(timeout), config.identity.id).await?;
             if peers.is_empty() {
                 println!("未发现设备；请确认对方正在运行 `clip-it serve`。");
@@ -84,7 +76,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::Send { to, device, paths } => {
+        Some(Command::Send { to, device, paths }) => {
             let target = resolve_target(to, device.as_deref(), config.identity.id).await?;
             let receipt = send_paths(target, &paths).await?;
             println!(
@@ -92,13 +84,24 @@ async fn main() -> Result<()> {
                 receipt.files, receipt.bytes, target
             );
         }
-        Command::Pick { paths } => picker::run(paths, config.identity.id).await?,
-        Command::Integrate { action } => match action {
+        Some(Command::Pick { paths }) => picker::run(paths, config.identity.id).await?,
+        Some(Command::Integrate { action }) => match action {
             IntegrationAction::Install => integration::install()?,
             IntegrationAction::Remove => integration::remove()?,
         },
     }
 
+    Ok(())
+}
+
+async fn serve(config: AppConfig) -> Result<()> {
+    println!(
+        "ClipIt {} 正在监听 {}",
+        config.device_name,
+        config.listen_addr()
+    );
+    let discovery = Discovery::new(config.identity.clone())?;
+    tokio::try_join!(discovery.run_announcer(), receive_loop(config))?;
     Ok(())
 }
 

@@ -41,6 +41,45 @@ cargo build --release
 `target/release/clip-it`（macOS）。正式安装右键菜单前，请先把它复制到不会移动
 的用户程序目录，因为菜单会记录当前可执行文件的绝对路径。
 
+### 安装包
+
+macOS 在本机生成 DMG（默认生成当前 CPU 架构）：
+
+```bash
+./scripts/package-macos.sh
+```
+
+生成的 `dist/ClipIt-<版本>-macos-<架构>.dmg` 内含 `ClipIt.app` 和应用程序目录
+快捷方式。把应用拖到 Applications 后，双击即可启动接收服务，再执行：
+
+```bash
+/Applications/ClipIt.app/Contents/MacOS/clip-it integrate install
+```
+
+Windows 可在 PowerShell 中运行 `./scripts/package-windows.ps1`，生成独立 EXE、ZIP
+和 SHA-256 校验文件。所有安装包都在 `dist/` 下；未配置代码签名的构建为未签名
+版本，macOS 首次启动时需要右键应用并选择“打开”。
+
+## GitHub CI/CD
+
+`.github/workflows/release.yml` 会在 PR 上执行格式、测试和 Clippy 检查；推送到
+`main` 或手动触发时构建 Windows x86_64 EXE/ZIP 和 macOS arm64+x86_64 通用
+DMG，并保存为 Actions artifacts。推送与 `Cargo.toml` 版本对应的标签会自动创建
+GitHub Release：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+无 Apple 证书也能构建 ad-hoc 签名的 DMG。若需要公开分发时的 Developer ID
+签名和 Apple 公证，请在仓库 Actions secrets 中配置：
+
+- `MACOS_CERTIFICATE_BASE64`：Developer ID Application `.p12` 的 Base64 内容
+- `MACOS_CERTIFICATE_PASSWORD`：`.p12` 密码
+- `MACOS_SIGN_IDENTITY`：完整签名身份，例如 `Developer ID Application: ...`
+- `APPLE_ID`、`APPLE_APP_PASSWORD`、`APPLE_TEAM_ID`：Apple 公证凭据
+
 ## 使用
 
 接收端和发送端都建议常驻运行：
