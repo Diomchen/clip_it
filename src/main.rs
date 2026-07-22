@@ -171,14 +171,17 @@ async fn serve(config: AppConfig, policy: ReceivePolicy) -> Result<()> {
 async fn run_default(config: AppConfig) -> Result<()> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        #[cfg(target_os = "windows")]
-        detach_windows_console();
         if let Err(error) = integration::install() {
             eprintln!("安装文件右键菜单失败: {error:#}");
         }
         if let Err(error) = integration::startup_install() {
             eprintln!("启用登录启动失败: {error:#}");
         }
+        // Integration prints status messages, so keep the console handles valid
+        // until it finishes. Detaching earlier makes release builds abort when
+        // println! writes to an invalid Windows console handle.
+        #[cfg(target_os = "windows")]
+        detach_windows_console();
         tray::run(config)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -190,6 +193,9 @@ async fn run_default(config: AppConfig) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn detach_windows_console() {
+    if std::env::var_os("CLIP_IT_KEEP_CONSOLE").is_some() {
+        return;
+    }
     unsafe extern "system" {
         fn FreeConsole() -> i32;
     }
