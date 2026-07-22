@@ -77,7 +77,6 @@ mod desktop {
                     match TrayIconBuilder::new()
                         .with_menu(Box::new(menu.clone()))
                         .with_tooltip("ClipIt - 局域网剪贴板与文件同步")
-                        .with_title("ClipIt")
                         .with_icon_as_template(cfg!(target_os = "macos"))
                         .with_icon(tray_icon_image())
                         .build()

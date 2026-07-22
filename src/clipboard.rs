@@ -9,6 +9,7 @@ use crate::config::AppConfig;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod desktop {
     use std::{
+        collections::VecDeque,
         path::PathBuf,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
@@ -32,11 +33,12 @@ mod desktop {
 
     const DUPLICATE_WINDOW: Duration = Duration::from_millis(800);
     const REMOTE_SUPPRESSION_WINDOW: Duration = Duration::from_secs(5);
+    const MAX_RECENT_FINGERPRINTS: usize = 128;
 
     #[derive(Default)]
     pub(super) struct ClipboardState {
-        last_local: Option<([u8; 32], Instant)>,
-        last_remote: Option<([u8; 32], Instant)>,
+        recent_local: VecDeque<([u8; 32], Instant)>,
+        recent_remote: VecDeque<([u8; 32], Instant)>,
     }
 
     #[derive(Clone, Debug)]
@@ -122,6 +124,7 @@ mod desktop {
                     .filter(|peer| peer.id != config.identity.id)
                     .collect::<Vec<_>>();
                 if peers.is_empty() {
+                    eprintln!("剪贴板已变化，但未发现其他在线 ClipIt 设备");
                     continue;
                 }
 
@@ -178,24 +181,43 @@ mod desktop {
             return true;
         };
         let now = Instant::now();
-        if state.last_remote.is_some_and(|(value, at)| {
-            value == fingerprint && now.duration_since(at) < REMOTE_SUPPRESSION_WINDOW
-        }) {
+        prune_expired(&mut state.recent_remote, now, REMOTE_SUPPRESSION_WINDOW);
+        if state
+            .recent_remote
+            .iter()
+            .any(|(value, _)| *value == fingerprint)
+        {
             return true;
         }
-        if state.last_local.is_some_and(|(value, at)| {
-            value == fingerprint && now.duration_since(at) < DUPLICATE_WINDOW
-        }) {
+        prune_expired(&mut state.recent_local, now, DUPLICATE_WINDOW);
+        if state
+            .recent_local
+            .iter()
+            .any(|(value, _)| *value == fingerprint)
+        {
             return true;
         }
-        state.last_local = Some((fingerprint, now));
+        remember(&mut state.recent_local, fingerprint, now);
         false
     }
 
     fn mark_remote(state: &Arc<Mutex<ClipboardState>>, fingerprint: [u8; 32]) {
         if let Ok(mut state) = state.lock() {
-            state.last_remote = Some((fingerprint, Instant::now()));
+            let now = Instant::now();
+            prune_expired(&mut state.recent_remote, now, REMOTE_SUPPRESSION_WINDOW);
+            remember(&mut state.recent_remote, fingerprint, now);
         }
+    }
+
+    fn prune_expired(entries: &mut VecDeque<([u8; 32], Instant)>, now: Instant, window: Duration) {
+        entries.retain(|(_, at)| now.duration_since(*at) < window);
+    }
+
+    fn remember(entries: &mut VecDeque<([u8; 32], Instant)>, fingerprint: [u8; 32], now: Instant) {
+        if entries.len() == MAX_RECENT_FINGERPRINTS {
+            entries.pop_front();
+        }
+        entries.push_back((fingerprint, now));
     }
 
     fn text_fingerprint(text: &str) -> [u8; 32] {
@@ -229,11 +251,14 @@ mod desktop {
         }
 
         #[test]
-        fn suppresses_remote_echo() {
+        fn suppresses_multiple_remote_echoes() {
             let state = Arc::new(Mutex::new(ClipboardState::default()));
-            let fingerprint = text_fingerprint("remote");
-            mark_remote(&state, fingerprint);
-            assert!(should_skip(&state, fingerprint));
+            let first = text_fingerprint("first remote value");
+            let second = text_fingerprint("second remote value");
+            mark_remote(&state, first);
+            mark_remote(&state, second);
+            assert!(should_skip(&state, first));
+            assert!(should_skip(&state, second));
         }
     }
 }

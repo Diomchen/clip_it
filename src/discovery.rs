@@ -34,8 +34,11 @@ impl Discovery {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
             .await
             .context("绑定发现广播套接字失败")?;
+        socket.set_broadcast(true)?;
         socket.set_multicast_ttl_v4(1)?;
-        let target: SocketAddr = format!("{DISCOVERY_GROUP}:{DISCOVERY_PORT}").parse()?;
+        let multicast_target: SocketAddr = format!("{DISCOVERY_GROUP}:{DISCOVERY_PORT}").parse()?;
+        let broadcast_target =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DISCOVERY_PORT));
         let payload = serde_json::to_vec(&Announcement {
             magic: DISCOVERY_MAGIC.into(),
             version: PROTOCOL_VERSION,
@@ -45,11 +48,14 @@ impl Discovery {
         })?;
 
         loop {
-            if let Err(error) = socket.send_to(&payload, target).await {
-                eprintln!("发送设备发现广播失败，将重试: {error}");
-                time::sleep(Duration::from_secs(5)).await;
-            } else {
-                time::sleep(Duration::from_secs(1)).await;
+            let multicast = socket.send_to(&payload, multicast_target).await;
+            let broadcast = socket.send_to(&payload, broadcast_target).await;
+            match (multicast, broadcast) {
+                (Err(multicast), Err(broadcast)) => {
+                    eprintln!("发送设备发现广播失败，将重试: 组播: {multicast}; 广播: {broadcast}");
+                    time::sleep(Duration::from_secs(5)).await;
+                }
+                _ => time::sleep(Duration::from_secs(1)).await,
             }
         }
     }
@@ -95,8 +101,12 @@ impl Discovery {
 fn multicast_listener(group: Ipv4Addr) -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
     socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT).into())?;
-    socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;
+    if let Err(error) = socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED) {
+        eprintln!("加入设备发现组播失败，将仅使用局域网广播: {error}");
+    }
     socket.set_nonblocking(true)?;
     let std_socket: std::net::UdpSocket = socket.into();
     UdpSocket::from_std(std_socket).context("创建异步发现套接字失败")
