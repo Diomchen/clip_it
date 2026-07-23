@@ -653,6 +653,7 @@ pub async fn send_paths(
     send_paths_with_intent(target, paths, sender, TransferIntent::Manual).await
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub async fn send_clipboard_image(
     target: SocketAddr,
     png: &[u8],
@@ -1392,6 +1393,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     #[tokio::test]
     async fn clipboard_image_uses_binary_payload_after_header() {
         let mut png = Vec::from(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".as_slice());
