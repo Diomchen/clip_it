@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use crate::{
     config::{AppConfig, ReceivePolicy, TrustedDevice},
     discovery::{Discovery, Peer},
-    transfer::{receive_loop, send_paths},
+    transfer::{receive_loop, run_benchmark, send_paths},
 };
 
 #[derive(Debug, Parser)]
@@ -49,6 +49,17 @@ enum Command {
         device: Option<String>,
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+    },
+    /// Measure memory-to-memory LAN throughput with parallel TCP streams.
+    Benchmark {
+        #[arg(long, value_name = "IP:PORT", conflicts_with = "device")]
+        to: Option<SocketAddr>,
+        #[arg(long, value_name = "NAME", conflicts_with = "to")]
+        device: Option<String>,
+        #[arg(long, default_value_t = 1, value_name = "GiB")]
+        size_gib: u64,
+        #[arg(long, default_value_t = 4)]
+        streams: usize,
     },
     /// Open the browser-based device picker (used by the context menu).
     Pick {
@@ -124,7 +135,7 @@ async fn main() -> Result<()> {
                 println!("未发现设备；请确认对方正在运行 `clip-it serve`。");
             } else {
                 for peer in peers {
-                    println!("{}\t{}\t{}", peer.name, peer.addr, peer.id);
+                    println!("{} {}\t{}\t{}", peer.emoji, peer.name, peer.addr, peer.id);
                 }
             }
         }
@@ -134,6 +145,25 @@ async fn main() -> Result<()> {
             println!(
                 "已发送 {} 个文件，共 {} 字节到 {}",
                 receipt.files, receipt.bytes, target
+            );
+        }
+        Some(Command::Benchmark {
+            to,
+            device,
+            size_gib,
+            streams,
+        }) => {
+            let target = resolve_target(to, device.as_deref(), config.identity.id).await?;
+            let bytes = size_gib
+                .checked_mul(1024 * 1024 * 1024)
+                .context("基准大小溢出")?;
+            let receipt = run_benchmark(target, bytes, streams, &config.identity).await?;
+            println!(
+                "已发送 {:.2} GiB，{} 条并发流，用时 {:.3} 秒，吞吐 {:.2} Gbit/s",
+                receipt.bytes as f64 / 1024_f64.powi(3),
+                streams,
+                receipt.elapsed.as_secs_f64(),
+                receipt.gigabits_per_second
             );
         }
         Some(Command::Pick { paths }) => picker::run(paths, config.identity).await?,

@@ -17,6 +17,8 @@ use crate::protocol::TRANSFER_PORT;
 pub struct Identity {
     pub id: Uuid,
     pub name: String,
+    #[serde(default = "crate::protocol::default_device_emoji")]
+    pub emoji: String,
     pub transfer_port: u16,
 }
 
@@ -33,6 +35,10 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default = "crate::protocol::default_device_emoji")]
+    pub device_emoji: String,
     pub transfer_port: u16,
     pub receive_policy: ReceivePolicy,
     pub clipboard_sync: bool,
@@ -41,6 +47,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            device_name: "ClipIt Device".into(),
+            device_emoji: crate::protocol::default_device_emoji(),
             transfer_port: TRANSFER_PORT,
             receive_policy: ReceivePolicy::Confirm,
             clipboard_sync: true,
@@ -102,6 +110,7 @@ impl AppConfig {
                 } else {
                     name
                 },
+                emoji: crate::protocol::default_device_emoji(),
                 transfer_port: TRANSFER_PORT,
             };
             fs::write(&identity_path, serde_json::to_vec_pretty(&identity)?)
@@ -110,16 +119,23 @@ impl AppConfig {
         };
 
         let settings_path = config_dir.join("settings.json");
-        let settings = if settings_path.exists() {
+        let mut settings = if settings_path.exists() {
             let bytes = fs::read(&settings_path).context("读取 ClipIt 设置失败")?;
             serde_json::from_slice::<Settings>(&bytes).context("ClipIt 设置格式错误")?
         } else {
             Settings {
+                device_name: identity.name.clone(),
+                device_emoji: identity.emoji.clone(),
                 transfer_port: identity.transfer_port,
                 ..Settings::default()
             }
         };
+        if settings.device_name.trim().is_empty() {
+            settings.device_name = identity.name.clone();
+        }
         validate_settings(&settings)?;
+        identity.name.clone_from(&settings.device_name);
+        identity.emoji.clone_from(&settings.device_emoji);
         identity.transfer_port = settings.transfer_port;
 
         let download_dir = std::env::var_os("CLIP_IT_DOWNLOAD_DIR")
@@ -161,6 +177,14 @@ impl AppConfig {
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {
+    let name = settings.device_name.trim();
+    if name.is_empty() || name.chars().count() > 48 || name.chars().any(char::is_control) {
+        bail!("设备名称不能为空、不能包含控制字符，且最多 48 个字符");
+    }
+    let emoji = settings.device_emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > 12 || emoji.chars().any(char::is_control) {
+        bail!("节点图标不能为空、不能包含控制字符，且最多 12 个字符");
+    }
     if settings.transfer_port == 0
         || [
             crate::protocol::DISCOVERY_PORT,
@@ -321,5 +345,38 @@ mod tests {
             ..Settings::default()
         };
         assert!(validate_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn validates_custom_node_identity() {
+        let settings = Settings {
+            device_name: "客厅 Mac".into(),
+            device_emoji: "🍎".into(),
+            ..Settings::default()
+        };
+        assert!(validate_settings(&settings).is_ok());
+
+        let settings = Settings {
+            device_name: " ".into(),
+            ..Settings::default()
+        };
+        assert!(validate_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn old_settings_receive_profile_defaults() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"transfer_port":42490,"receive_policy":"confirm","clipboard_sync":true}"#,
+        )
+        .unwrap();
+        assert!(settings.device_name.is_empty());
+        assert_eq!(settings.device_emoji, "📋");
+
+        let identity: Identity = serde_json::from_str(
+            r#"{"id":"00000000-0000-4000-8000-000000000001","name":"旧电脑","transfer_port":42490}"#,
+        )
+        .unwrap();
+        assert_eq!(identity.name, "旧电脑");
+        assert_eq!(identity.emoji, "📋");
     }
 }

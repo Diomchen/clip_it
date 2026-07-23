@@ -35,6 +35,7 @@ done
 APP_DIR="$WORK_DIR/dmg/ClipIt.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
+cp "$ROOT_DIR/assets/app-icon.icns" "$CONTENTS_DIR/Resources/AppIcon.icns"
 
 if [[ "${#BINARIES[@]}" -eq 1 ]]; then
     cp "${BINARIES[0]}" "$CONTENTS_DIR/MacOS/clip-it"
@@ -56,6 +57,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
   <key>CFBundleDisplayName</key><string>ClipIt</string>
   <key>CFBundleExecutable</key><string>clip-it</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>dev.clip-it.app</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>ClipIt</string>

@@ -18,6 +18,7 @@ use crate::{
 pub struct Peer {
     pub id: Uuid,
     pub name: String,
+    pub emoji: String,
     pub addr: SocketAddr,
 }
 
@@ -44,6 +45,7 @@ impl Discovery {
             version: PROTOCOL_VERSION,
             id: self.identity.id,
             name: self.identity.name,
+            emoji: self.identity.emoji,
             transfer_port: self.identity.transfer_port,
         })?;
 
@@ -87,6 +89,7 @@ impl Discovery {
                 Peer {
                     id: announcement.id,
                     name: announcement.name,
+                    emoji: announcement.emoji,
                     addr: SocketAddr::new(source.ip(), announcement.transfer_port),
                 },
             );

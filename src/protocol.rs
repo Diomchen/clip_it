@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 3;
-pub const DISCOVERY_MAGIC: &str = "CLIPIT_DISCOVERY_V3";
+pub const PROTOCOL_VERSION: u16 = 4;
+pub const DISCOVERY_MAGIC: &str = "CLIPIT_DISCOVERY_V4";
 pub const DISCOVERY_GROUP: &str = "239.255.42.89";
 pub const DISCOVERY_PORT: u16 = 42_489;
 pub const TRANSFER_PORT: u16 = 42_490;
@@ -10,11 +10,19 @@ pub const TRAY_INSTANCE_PORT: u16 = 42_491;
 pub const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
 
+pub fn default_device_emoji() -> String {
+    "📋".into()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Request {
     FileTransfer(Manifest),
+    FileChunk(FileChunk),
+    CompleteTransfer(CompleteTransfer),
     ClipboardText(ClipboardText),
+    Ping(Ping),
+    Benchmark(BenchmarkRequest),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +31,8 @@ pub struct Announcement {
     pub version: u16,
     pub id: Uuid,
     pub name: String,
+    #[serde(default = "default_device_emoji")]
+    pub emoji: String,
     pub transfer_port: u16,
 }
 
@@ -31,6 +41,8 @@ pub struct Manifest {
     pub version: u16,
     pub sender: SenderIdentity,
     pub intent: TransferIntent,
+    pub transfer_id: Uuid,
+    pub chunk_size: u32,
     pub files: Vec<FileEntry>,
 }
 
@@ -50,6 +62,36 @@ pub struct ClipboardText {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Ping {
+    pub version: u16,
+    pub sender: SenderIdentity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FileChunk {
+    pub version: u16,
+    pub sender: SenderIdentity,
+    pub transfer_id: Uuid,
+    pub file_index: u32,
+    pub offset: u64,
+    pub length: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompleteTransfer {
+    pub version: u16,
+    pub sender: SenderIdentity,
+    pub transfer_id: Uuid,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BenchmarkRequest {
+    pub version: u16,
+    pub sender: SenderIdentity,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SenderIdentity {
     pub id: Uuid,
     pub name: String,
@@ -59,7 +101,15 @@ pub struct SenderIdentity {
 pub struct FileEntry {
     pub relative_path: String,
     pub size: u64,
+    pub modified_millis: u64,
     pub kind: EntryKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ChunkRange {
+    pub file_index: u32,
+    pub offset: u64,
+    pub length: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,4 +127,8 @@ pub struct Response {
     pub files: u64,
     #[serde(default)]
     pub bytes: u64,
+    #[serde(default)]
+    pub missing_chunks: Vec<ChunkRange>,
+    #[serde(default)]
+    pub elapsed_micros: u64,
 }

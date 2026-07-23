@@ -14,8 +14,10 @@ and ports.
   loopback-only confirmation page for unknown senders.
 - The desktop executable provides a Windows tray / macOS menu-bar controller,
   login startup, loopback settings, and automatic text/file clipboard sync.
-- The next milestone is resumable and parallel transfers plus throughput
-  benchmarks; do not introduce a bundled browser runtime.
+- Protocol v4 adds resumable 32 MiB chunks, four parallel transfer streams,
+  a LAN benchmark command, and a live device-bubble settings view.
+- The next milestone is signed updates and native Windows 11 top-level menu
+  integration; do not introduce a bundled browser runtime.
 
 ## Technical Direction
 

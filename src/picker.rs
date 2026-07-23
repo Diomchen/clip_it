@@ -63,7 +63,8 @@ pub async fn run(paths: Vec<PathBuf>, identity: Identity) -> Result<()> {
             .enumerate()
             .map(|(index, peer)| {
                 format!(
-                    "<a class=\"device\" href=\"/send?token={token}&peer={index}\">{}<small>{}</small></a>",
+                    "<a class=\"device\" href=\"/send?token={token}&peer={index}\"><span class=\"label\"><b>{}</b>{}</span><small>{}</small></a>",
+                    html_escape(&peer.emoji),
                     html_escape(&peer.name),
                     html_escape(&peer.addr.to_string())
                 )
@@ -113,7 +114,7 @@ fn query_value<'a>(target: &'a str, key: &str) -> Option<&'a str> {
 
 fn page(content: &str) -> String {
     format!(
-        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>ClipIt</title><style>body{{font:16px system-ui;background:#f4f6f8;color:#17202a;max-width:560px;margin:12vh auto;padding:24px}}h1{{font-size:26px}}.devices{{display:grid;gap:12px}}.device{{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-radius:12px;background:white;color:inherit;text-decoration:none;box-shadow:0 3px 16px #0001}}.device:hover{{outline:2px solid #3b82f6}}small{{color:#667085}}</style><body>{content}</body></html>"
+        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>ClipIt</title><style>body{{font:16px system-ui;background:#f4f6f8;color:#17202a;max-width:560px;margin:12vh auto;padding:24px}}h1{{font-size:26px}}.devices{{display:grid;gap:12px}}.device{{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-radius:12px;background:white;color:inherit;text-decoration:none;box-shadow:0 3px 16px #0001}}.device:hover{{outline:2px solid #3b82f6}}.label{{display:flex;align-items:center;gap:10px}}.label b{{font-size:24px}}small{{color:#667085}}</style><body>{content}</body></html>"
     )
 }
 

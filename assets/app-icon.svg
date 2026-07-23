@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="surface" x1="158" y1="110" x2="866" y2="914" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#61C8FF"/>
+      <stop offset="0.46" stop-color="#1679F6"/>
+      <stop offset="1" stop-color="#5856E8"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="340" y1="238" x2="690" y2="790" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.14"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="512" y1="84" x2="512" y2="530" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="cardShadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#083A9A" flood-opacity="0.28"/>
+    </filter>
+    <filter id="markShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0646B4" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <rect x="72" y="72" width="880" height="880" rx="206" fill="url(#surface)"/>
+  <path d="M278 94h468c102 0 184 82 184 184v64C766 236 548 186 248 236 166 250 112 226 93 196c30-61 93-102 185-102Z" fill="url(#shine)"/>
+
+  <g filter="url(#cardShadow)">
+    <rect x="276" y="226" width="472" height="584" rx="112" fill="url(#glass)" stroke="#FFFFFF" stroke-opacity="0.46" stroke-width="8"/>
+    <rect x="386" y="178" width="252" height="132" rx="66" fill="#F8FBFF"/>
+    <rect x="440" y="218" width="144" height="52" rx="26" fill="#2382F4" fill-opacity="0.82"/>
+  </g>
+
+  <g fill="none" stroke="#FFFFFF" stroke-width="66" stroke-linecap="round" stroke-linejoin="round" filter="url(#markShadow)">
+    <path d="M440 610 590 460c45-45 118-45 163 0 44 44 44 117 0 161l-104 104"/>
+    <path d="m584 416-150 150c-45 45-118 45-163 0-44-44-44-117 0-161l104-104"/>
+  </g>
+  <circle cx="300" cy="718" r="34" fill="#FFFFFF" fill-opacity="0.92"/>
+  <circle cx="724" cy="326" r="26" fill="#FFFFFF" fill-opacity="0.78"/>
+</svg>
