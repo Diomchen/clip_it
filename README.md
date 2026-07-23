@@ -72,8 +72,8 @@ DMG，并保存为 Actions artifacts。推送与 `Cargo.toml` 版本对应的标
 GitHub Release：
 
 ```bash
-git tag v0.4.1
-git push origin v0.4.1
+git tag v0.4.2
+git push origin v0.4.2
 ```
 
 无 Apple 证书也能构建 ad-hoc 签名的 DMG。若需要公开分发时的 Developer ID

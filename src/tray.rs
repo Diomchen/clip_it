@@ -141,12 +141,13 @@ mod desktop {
             .create(true)
             .append(true)
             .open(config.config_dir.join("service.log"))?;
-        Command::new(std::env::current_exe()?)
+        let mut command = Command::new(std::env::current_exe()?);
+        command
             .arg("serve")
             .stdout(Stdio::from(log.try_clone()?))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .context("启动 ClipIt 后台服务失败")
+            .stderr(Stdio::from(log));
+        suppress_windows_console(&mut command);
+        command.spawn().context("启动 ClipIt 后台服务失败")
     }
 
     fn restart_child(child: &mut Child, config: &AppConfig, status: &MenuItem) {
@@ -180,14 +181,30 @@ mod desktop {
         };
         let config_dir = config.config_dir.clone();
         std::thread::spawn(move || {
-            let status = Command::new(executable)
+            let mut command = Command::new(executable);
+            command
                 .arg("configure")
                 .env("CLIP_IT_CONFIG_DIR", config_dir)
-                .status();
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            suppress_windows_console(&mut command);
+            let status = command.status();
             if status.is_ok_and(|status| status.success()) {
                 let _ = proxy.send_event(UserEvent::SettingsFinished);
             }
         });
+    }
+
+    fn suppress_windows_console(command: &mut Command) {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = command;
     }
 
     fn status_text(config: &AppConfig, running: bool) -> String {
