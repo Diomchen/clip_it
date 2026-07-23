@@ -3,8 +3,10 @@ use std::{
     fs,
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
 };
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
