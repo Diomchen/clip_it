@@ -10,7 +10,7 @@ use tokio::{net::UdpSocket, time};
 use uuid::Uuid;
 
 use crate::{
-    config::Identity,
+    config::{Identity, PairedDevices},
     protocol::{Announcement, DISCOVERY_GROUP, DISCOVERY_MAGIC, DISCOVERY_PORT, PROTOCOL_VERSION},
 };
 
@@ -20,15 +20,20 @@ pub struct Peer {
     pub name: String,
     pub emoji: String,
     pub addr: SocketAddr,
+    pub connected_devices: Vec<Uuid>,
 }
 
 pub struct Discovery {
     identity: Identity,
+    paired_devices: PairedDevices,
 }
 
 impl Discovery {
-    pub fn new(identity: Identity) -> Result<Self> {
-        Ok(Self { identity })
+    pub fn new(identity: Identity, paired_devices: PairedDevices) -> Result<Self> {
+        Ok(Self {
+            identity,
+            paired_devices,
+        })
     }
 
     pub async fn run_announcer(self) -> Result<()> {
@@ -40,16 +45,23 @@ impl Discovery {
         let multicast_target: SocketAddr = format!("{DISCOVERY_GROUP}:{DISCOVERY_PORT}").parse()?;
         let broadcast_target =
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, DISCOVERY_PORT));
-        let payload = serde_json::to_vec(&Announcement {
-            magic: DISCOVERY_MAGIC.into(),
-            version: PROTOCOL_VERSION,
-            id: self.identity.id,
-            name: self.identity.name,
-            emoji: self.identity.emoji,
-            transfer_port: self.identity.transfer_port,
-        })?;
-
         loop {
+            let connected_devices = match self.paired_devices.list() {
+                Ok(devices) => devices.into_iter().map(|device| device.id).collect(),
+                Err(error) => {
+                    eprintln!("读取已连接设备列表失败，将在下次广播时重试: {error:#}");
+                    Vec::new()
+                }
+            };
+            let payload = serde_json::to_vec(&Announcement {
+                magic: DISCOVERY_MAGIC.into(),
+                version: PROTOCOL_VERSION,
+                id: self.identity.id,
+                name: self.identity.name.clone(),
+                emoji: self.identity.emoji.clone(),
+                transfer_port: self.identity.transfer_port,
+                connected_devices,
+            })?;
             let multicast = socket.send_to(&payload, multicast_target).await;
             let broadcast = socket.send_to(&payload, broadcast_target).await;
             match (multicast, broadcast) {
@@ -91,6 +103,7 @@ impl Discovery {
                     name: announcement.name,
                     emoji: announcement.emoji,
                     addr: SocketAddr::new(source.ip(), announcement.transfer_port),
+                    connected_devices: announcement.connected_devices,
                 },
             );
         }

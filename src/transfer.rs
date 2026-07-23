@@ -20,12 +20,16 @@ use walkdir::WalkDir;
 
 use crate::{
     clipboard::ClipboardBridge,
-    config::{AppConfig, Identity, ReceivePolicy, TrustedDevice, TrustedDevices},
+    config::{
+        AppConfig, Identity, PairedDevice, PairedDevices, ReceivePolicy, TrustedDevice,
+        TrustedDevices,
+    },
     confirmation::{self, Decision, IncomingSummary},
     protocol::{
-        BenchmarkRequest, ChunkRange, ClipboardText, CompleteTransfer, EntryKind, FileChunk,
-        FileEntry, MAX_CLIPBOARD_TEXT_BYTES, MAX_MANIFEST_BYTES, Manifest, PROTOCOL_VERSION, Ping,
-        Request, Response, SenderIdentity, TransferIntent,
+        BenchmarkRequest, ChunkRange, ClipboardImage, ClipboardText, CompleteTransfer,
+        ConnectionUpdate, EntryKind, FileChunk, FileEntry, MAX_CLIPBOARD_IMAGE_BYTES,
+        MAX_CLIPBOARD_IMAGE_PIXELS, MAX_CLIPBOARD_TEXT_BYTES, MAX_MANIFEST_BYTES, Manifest,
+        PROTOCOL_VERSION, Ping, Request, Response, SenderIdentity, TransferIntent,
     },
 };
 
@@ -62,6 +66,12 @@ struct ReceiveSession {
     completed: HashSet<ChunkRange>,
 }
 
+#[derive(Clone)]
+struct DeviceStores {
+    trusted: TrustedDevices,
+    paired: PairedDevices,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ResumeState {
     transfer_id: Uuid,
@@ -81,13 +91,16 @@ pub async fn receive_loop(
         .await
         .context("绑定文件传输端口失败")?;
     let download_dir = Arc::new(config.download_dir);
-    let trusted_devices = config.trusted_devices;
+    let devices = DeviceStores {
+        trusted: config.trusted_devices,
+        paired: config.paired_devices,
+    };
     let registry = TransferRegistry::default();
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let download_dir = Arc::clone(&download_dir);
-        let trusted_devices = trusted_devices.clone();
+        let devices = devices.clone();
         let clipboard = clipboard.clone();
         let registry = registry.clone();
         tokio::spawn(async move {
@@ -96,7 +109,7 @@ pub async fn receive_loop(
                 peer,
                 &download_dir,
                 policy,
-                &trusted_devices,
+                &devices,
                 &clipboard,
                 &registry,
             )
@@ -113,7 +126,7 @@ async fn receive_one(
     peer: SocketAddr,
     download_dir: &Path,
     policy: ReceivePolicy,
-    trusted_devices: &TrustedDevices,
+    devices: &DeviceStores,
     clipboard: &ClipboardBridge,
     registry: &TransferRegistry,
 ) -> Result<()> {
@@ -126,7 +139,7 @@ async fn receive_one(
                 peer,
                 download_dir,
                 policy,
-                trusted_devices,
+                &devices.trusted,
                 registry,
                 manifest,
             )
@@ -135,7 +148,11 @@ async fn receive_one(
         Request::ClipboardText(message) => {
             receive_clipboard_text(stream, peer, clipboard, message).await
         }
+        Request::ClipboardImage(message) => {
+            receive_clipboard_image(stream, peer, clipboard, message).await
+        }
         Request::Ping(message) => receive_ping(stream, message).await,
+        Request::Connection(message) => receive_connection(stream, &devices.paired, message).await,
         Request::FileChunk(chunk) => receive_file_chunk(stream, registry, chunk).await,
         Request::CompleteTransfer(message) => {
             complete_transfer(stream, registry, clipboard, message).await
@@ -151,6 +168,33 @@ async fn receive_ping(mut stream: TcpStream, message: Ping) -> Result<()> {
     }
     validate_sender(&message.sender)?;
     send_response(&mut stream, true, "pong", 0, 0).await
+}
+
+async fn receive_connection(
+    mut stream: TcpStream,
+    paired_devices: &PairedDevices,
+    message: ConnectionUpdate,
+) -> Result<()> {
+    if message.version != PROTOCOL_VERSION {
+        send_response(&mut stream, false, "协议版本不兼容", 0, 0).await?;
+        bail!("unsupported protocol version {}", message.version);
+    }
+    if let Err(error) =
+        validate_sender(&message.sender).and_then(|_| validate_emoji(&message.emoji))
+    {
+        send_response(&mut stream, false, &error.to_string(), 0, 0).await?;
+        return Err(error);
+    }
+    if message.connected {
+        paired_devices.add(PairedDevice::new(
+            message.sender.id,
+            message.sender.name,
+            message.emoji,
+        ))?;
+    } else {
+        paired_devices.remove(message.sender.id)?;
+    }
+    send_response(&mut stream, true, "connection updated", 0, 0).await
 }
 
 async fn receive_files(
@@ -559,6 +603,48 @@ async fn receive_clipboard_text(
     Ok(())
 }
 
+async fn receive_clipboard_image(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    clipboard: &ClipboardBridge,
+    message: ClipboardImage,
+) -> Result<()> {
+    if let Err(error) = validate_clipboard_image(&message) {
+        send_response(&mut stream, false, &error.to_string(), 0, 0).await?;
+        return Err(error);
+    }
+    let length = usize::try_from(message.length)?;
+    let mut png = vec![0_u8; length];
+    time::timeout(Duration::from_secs(30), stream.read_exact(&mut png))
+        .await
+        .context("接收剪贴板图片超时")??;
+    if let Err(error) = validate_png_dimensions(&png, message.width, message.height) {
+        send_response(&mut stream, false, &error.to_string(), 0, 0).await?;
+        return Err(error);
+    }
+    if *blake3::hash(&png).as_bytes() != message.blake3 {
+        send_response(&mut stream, false, "剪贴板图片校验失败", 0, 0).await?;
+        bail!("clipboard image checksum mismatch");
+    }
+    if let Err(error) = clipboard.apply_image(&png, message.width, message.height) {
+        send_response(&mut stream, false, &error.to_string(), 0, 0).await?;
+        return Err(error);
+    }
+    send_response(
+        &mut stream,
+        true,
+        "clipboard image updated",
+        0,
+        message.length,
+    )
+    .await?;
+    println!(
+        "已同步来自 {} ({}) 的图片剪贴板（{}x{}，{} 字节）",
+        message.sender.name, peer, message.width, message.height, message.length
+    );
+    Ok(())
+}
+
 pub async fn send_paths(
     target: SocketAddr,
     paths: &[PathBuf],
@@ -567,7 +653,44 @@ pub async fn send_paths(
     send_paths_with_intent(target, paths, sender, TransferIntent::Manual).await
 }
 
-pub async fn ping_peer(target: SocketAddr, sender: &Identity) -> Result<()> {
+pub async fn send_clipboard_image(
+    target: SocketAddr,
+    png: &[u8],
+    width: u32,
+    height: u32,
+    event_id: Uuid,
+    sender: &Identity,
+) -> Result<()> {
+    let length = u64::try_from(png.len())?;
+    let message = ClipboardImage {
+        version: PROTOCOL_VERSION,
+        sender: sender_identity(sender),
+        event_id,
+        width,
+        height,
+        length,
+        blake3: *blake3::hash(png).as_bytes(),
+    };
+    validate_clipboard_image(&message)?;
+    validate_png_dimensions(png, width, height)?;
+    let mut stream = TcpStream::connect(target)
+        .await
+        .with_context(|| format!("连接 {target} 失败"))?;
+    stream.set_nodelay(true)?;
+    write_json(&mut stream, &Request::ClipboardImage(message)).await?;
+    stream.write_all(png).await?;
+    let response: Response = read_json(&mut stream).await?;
+    if !response.ok {
+        bail!("接收端拒绝剪贴板图片同步: {}", response.message);
+    }
+    Ok(())
+}
+
+pub async fn set_peer_connection(
+    target: SocketAddr,
+    sender: &Identity,
+    connected: bool,
+) -> Result<()> {
     let mut stream = time::timeout(Duration::from_secs(2), TcpStream::connect(target))
         .await
         .context("连接设备超时")?
@@ -575,9 +698,11 @@ pub async fn ping_peer(target: SocketAddr, sender: &Identity) -> Result<()> {
     stream.set_nodelay(true)?;
     write_json(
         &mut stream,
-        &Request::Ping(Ping {
+        &Request::Connection(ConnectionUpdate {
             version: PROTOCOL_VERSION,
             sender: sender_identity(sender),
+            emoji: sender.emoji.clone(),
+            connected,
         }),
     )
     .await?;
@@ -585,7 +710,7 @@ pub async fn ping_peer(target: SocketAddr, sender: &Identity) -> Result<()> {
         .await
         .context("等待设备响应超时")??;
     if !response.ok {
-        bail!("设备连接探测失败: {}", response.message);
+        bail!("设备连接状态更新失败: {}", response.message);
     }
     Ok(())
 }
@@ -1062,6 +1187,42 @@ fn validate_sender(sender: &SenderIdentity) -> Result<()> {
     Ok(())
 }
 
+fn validate_clipboard_image(message: &ClipboardImage) -> Result<()> {
+    validate_sender(&message.sender)?;
+    let pixels = u64::from(message.width).saturating_mul(u64::from(message.height));
+    if message.version != PROTOCOL_VERSION
+        || message.event_id.is_nil()
+        || message.length == 0
+        || message.length > MAX_CLIPBOARD_IMAGE_BYTES as u64
+        || pixels == 0
+        || pixels > MAX_CLIPBOARD_IMAGE_PIXELS
+    {
+        bail!("剪贴板图片信息无效或超过限制");
+    }
+    Ok(())
+}
+
+fn validate_png_dimensions(png: &[u8], expected_width: u32, expected_height: u32) -> Result<()> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if png.len() < 24 || &png[..8] != PNG_SIGNATURE || &png[12..16] != b"IHDR" {
+        bail!("剪贴板图片不是有效的 PNG 数据");
+    }
+    let width = u32::from_be_bytes(png[16..20].try_into()?);
+    let height = u32::from_be_bytes(png[20..24].try_into()?);
+    if (width, height) != (expected_width, expected_height) {
+        bail!("剪贴板 PNG 尺寸与声明不一致");
+    }
+    Ok(())
+}
+
+fn validate_emoji(emoji: &str) -> Result<()> {
+    let emoji = emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > 12 || emoji.chars().any(char::is_control) {
+        bail!("设备图标无效");
+    }
+    Ok(())
+}
+
 fn clipboard_root_paths(transfer_root: &Path, safe_entries: &[PathBuf]) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut roots = Vec::new();
@@ -1172,6 +1333,100 @@ mod tests {
             chunk_size: CHUNK_SIZE,
         };
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn validates_clipboard_png_header_dimensions() {
+        let mut png_header = Vec::from(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".as_slice());
+        png_header.extend_from_slice(&1920_u32.to_be_bytes());
+        png_header.extend_from_slice(&1080_u32.to_be_bytes());
+
+        assert!(validate_png_dimensions(&png_header, 1920, 1080).is_ok());
+        assert!(validate_png_dimensions(&png_header, 1080, 1920).is_err());
+        assert!(validate_png_dimensions(b"not a png", 1, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_updates_are_persisted_by_the_receiver() {
+        let root = std::env::temp_dir().join(format!("clip-it-link-test-{}", Uuid::new_v4()));
+        let paired = PairedDevices::load(root.join("paired-devices.json")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver_store = paired.clone();
+        let receiver = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: Request = read_json(&mut stream).await.unwrap();
+                let Request::Connection(message) = request else {
+                    panic!("expected connection update");
+                };
+                receive_connection(stream, &receiver_store, message)
+                    .await
+                    .unwrap();
+            }
+        });
+        let sender = Identity {
+            id: Uuid::new_v4(),
+            name: "书房电脑".into(),
+            emoji: "💻".into(),
+            transfer_port: crate::protocol::TRANSFER_PORT,
+        };
+
+        set_peer_connection(address, &sender, true).await.unwrap();
+        assert!(
+            paired
+                .list()
+                .unwrap()
+                .iter()
+                .any(|device| device.id == sender.id)
+        );
+        set_peer_connection(address, &sender, false).await.unwrap();
+        receiver.await.unwrap();
+        assert!(
+            !paired
+                .list()
+                .unwrap()
+                .iter()
+                .any(|device| device.id == sender.id)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn clipboard_image_uses_binary_payload_after_header() {
+        let mut png = Vec::from(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".as_slice());
+        png.extend_from_slice(&2_u32.to_be_bytes());
+        png.extend_from_slice(&3_u32.to_be_bytes());
+        png.extend_from_slice(b"binary-payload");
+        let expected = png.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: Request = read_json(&mut stream).await.unwrap();
+            let Request::ClipboardImage(message) = request else {
+                panic!("expected clipboard image");
+            };
+            let mut payload = vec![0_u8; message.length as usize];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(payload, expected);
+            assert_eq!((message.width, message.height), (2, 3));
+            assert_eq!(*blake3::hash(&payload).as_bytes(), message.blake3);
+            send_response(&mut stream, true, "ok", 0, message.length)
+                .await
+                .unwrap();
+        });
+        let sender = Identity {
+            id: Uuid::new_v4(),
+            name: "截图设备".into(),
+            emoji: "📸".into(),
+            transfer_port: crate::protocol::TRANSFER_PORT,
+        };
+
+        send_clipboard_image(address, &png, 2, 3, Uuid::new_v4(), &sender)
+            .await
+            .unwrap();
+        receiver.await.unwrap();
     }
 
     #[test]

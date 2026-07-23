@@ -9,7 +9,7 @@ use crate::config::AppConfig;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod desktop {
     use std::{
-        collections::VecDeque,
+        collections::{HashSet, VecDeque},
         path::PathBuf,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
@@ -18,7 +18,7 @@ mod desktop {
     use anyhow::{Context, Result};
     use clipboard_rs::{
         Clipboard, ClipboardContext, ClipboardHandler, ClipboardWatcher, ClipboardWatcherContext,
-        ContentFormat,
+        ContentFormat, RustImageData, common::RustImage,
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -26,7 +26,8 @@ mod desktop {
     use crate::{
         config::AppConfig,
         discovery::Discovery,
-        transfer::{send_clipboard_text, send_paths_with_intent},
+        protocol::{MAX_CLIPBOARD_IMAGE_BYTES, MAX_CLIPBOARD_IMAGE_PIXELS},
+        transfer::{send_clipboard_image, send_clipboard_text, send_paths_with_intent},
     };
 
     use super::ClipboardBridge;
@@ -43,8 +44,19 @@ mod desktop {
 
     #[derive(Clone, Debug)]
     enum LocalClipboardEvent {
-        Text { event_id: Uuid, text: String },
-        Files { paths: Vec<PathBuf> },
+        Text {
+            event_id: Uuid,
+            text: String,
+        },
+        Image {
+            event_id: Uuid,
+            png: Arc<[u8]>,
+            width: u32,
+            height: u32,
+        },
+        Files {
+            paths: Vec<PathBuf>,
+        },
     }
 
     struct Handler {
@@ -72,6 +84,41 @@ mod desktop {
                     return;
                 }
                 let _ = self.sender.send(LocalClipboardEvent::Files { paths });
+                return;
+            }
+
+            if let Ok(image) = self.context.get_image() {
+                let (width, height) = image.get_size();
+                let pixels = u64::from(width).saturating_mul(u64::from(height));
+                if width == 0 || height == 0 || pixels > MAX_CLIPBOARD_IMAGE_PIXELS {
+                    eprintln!("剪贴板图片尺寸无效或超过限制: {width}x{height}");
+                    return;
+                }
+                let Ok(rgba) = image.to_rgba8() else {
+                    eprintln!("读取剪贴板图片像素失败");
+                    return;
+                };
+                let fingerprint = image_fingerprint(width, height, rgba.as_raw());
+                if should_skip(&self.state, fingerprint) {
+                    return;
+                }
+                let Ok(png) = image.to_png() else {
+                    eprintln!("将剪贴板图片编码为 PNG 失败");
+                    return;
+                };
+                if png.get_bytes().len() > MAX_CLIPBOARD_IMAGE_BYTES {
+                    eprintln!(
+                        "剪贴板图片超过 {} MiB，已跳过同步",
+                        MAX_CLIPBOARD_IMAGE_BYTES / 1024 / 1024
+                    );
+                    return;
+                }
+                let _ = self.sender.send(LocalClipboardEvent::Image {
+                    event_id: Uuid::new_v4(),
+                    png: Arc::from(png.get_bytes()),
+                    width,
+                    height,
+                });
                 return;
             }
 
@@ -119,12 +166,22 @@ mod desktop {
                         continue;
                     }
                 };
+                let paired_ids = match config.paired_devices.list() {
+                    Ok(devices) => devices
+                        .into_iter()
+                        .map(|device| device.id)
+                        .collect::<HashSet<_>>(),
+                    Err(error) => {
+                        eprintln!("读取已连接设备列表失败: {error:#}");
+                        continue;
+                    }
+                };
                 let peers = peers
                     .into_iter()
-                    .filter(|peer| peer.id != config.identity.id)
+                    .filter(|peer| peer.id != config.identity.id && paired_ids.contains(&peer.id))
                     .collect::<Vec<_>>();
                 if peers.is_empty() {
-                    eprintln!("剪贴板已变化，但未发现其他在线 ClipIt 设备");
+                    eprintln!("剪贴板已变化，但没有已连接且在线的 ClipIt 设备");
                     continue;
                 }
 
@@ -135,6 +192,22 @@ mod desktop {
                         let result = match event {
                             LocalClipboardEvent::Text { event_id, text } => {
                                 send_clipboard_text(peer.addr, &text, event_id, &identity).await
+                            }
+                            LocalClipboardEvent::Image {
+                                event_id,
+                                png,
+                                width,
+                                height,
+                            } => {
+                                send_clipboard_image(
+                                    peer.addr,
+                                    png.as_ref(),
+                                    width,
+                                    height,
+                                    event_id,
+                                    &identity,
+                                )
+                                .await
                             }
                             LocalClipboardEvent::Files { paths } => send_paths_with_intent(
                                 peer.addr,
@@ -174,6 +247,31 @@ mod desktop {
                     .collect(),
             )
             .map_err(|error| anyhow::anyhow!("写入远端文件剪贴板失败: {error}"))
+    }
+
+    pub(super) fn apply_image(
+        bridge: &ClipboardBridge,
+        png: &[u8],
+        expected_width: u32,
+        expected_height: u32,
+    ) -> Result<()> {
+        let image = RustImageData::from_bytes(png)
+            .map_err(|error| anyhow::anyhow!("解析远端剪贴板图片失败: {error}"))?;
+        let (width, height) = image.get_size();
+        if (width, height) != (expected_width, expected_height) {
+            anyhow::bail!("远端剪贴板图片尺寸与声明不一致");
+        }
+        let rgba = image
+            .to_rgba8()
+            .map_err(|error| anyhow::anyhow!("读取远端剪贴板图片像素失败: {error}"))?;
+        mark_remote(
+            &bridge.state,
+            image_fingerprint(width, height, rgba.as_raw()),
+        );
+        ClipboardContext::new()
+            .map_err(|error| anyhow::anyhow!("打开系统剪贴板失败: {error}"))?
+            .set_image(image)
+            .map_err(|error| anyhow::anyhow!("写入远端图片剪贴板失败: {error}"))
     }
 
     fn should_skip(state: &Arc<Mutex<ClipboardState>>, fingerprint: [u8; 32]) -> bool {
@@ -237,6 +335,15 @@ mod desktop {
         *hasher.finalize().as_bytes()
     }
 
+    fn image_fingerprint(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"image\0");
+        hasher.update(&width.to_le_bytes());
+        hasher.update(&height.to_le_bytes());
+        hasher.update(rgba);
+        *hasher.finalize().as_bytes()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -259,6 +366,18 @@ mod desktop {
             mark_remote(&state, second);
             assert!(should_skip(&state, first));
             assert!(should_skip(&state, second));
+        }
+
+        #[test]
+        fn image_fingerprints_include_dimensions_and_pixels() {
+            assert_ne!(
+                image_fingerprint(1, 1, &[0; 4]),
+                image_fingerprint(2, 1, &[0; 8])
+            );
+            assert_ne!(
+                image_fingerprint(1, 1, &[0; 4]),
+                image_fingerprint(1, 1, &[1; 4])
+            );
         }
     }
 }
@@ -290,6 +409,16 @@ impl ClipboardBridge {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
             let _ = paths;
+            bail!("当前平台不支持剪贴板同步")
+        }
+    }
+
+    pub fn apply_image(&self, png: &[u8], width: u32, height: u32) -> Result<()> {
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        return desktop::apply_image(self, png, width, height);
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let _ = (png, width, height);
             bail!("当前平台不支持剪贴板同步")
         }
     }

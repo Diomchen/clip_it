@@ -190,7 +190,7 @@ async fn serve(config: AppConfig, policy: ReceivePolicy) -> Result<()> {
         clipboard::start(config.clone(), clipboard.clone())?;
         println!("文本及文件剪贴板自动同步已开启");
     }
-    let discovery = Discovery::new(config.identity.clone())?;
+    let discovery = Discovery::new(config.identity.clone(), config.paired_devices.clone())?;
     tokio::try_join!(
         discovery.run_announcer(),
         receive_loop(config, policy, clipboard)

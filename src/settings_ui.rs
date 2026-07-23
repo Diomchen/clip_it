@@ -15,9 +15,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    config::{AppConfig, ReceivePolicy, Settings},
+    config::{AppConfig, PairedDevice, ReceivePolicy, Settings},
     discovery::{Discovery, Peer},
-    transfer::ping_peer,
+    transfer::set_peer_connection,
 };
 
 const ONLINE_WINDOW: Duration = Duration::from_secs(4);
@@ -26,7 +26,7 @@ const VISIBLE_WINDOW: Duration = Duration::from_secs(20);
 #[derive(Default)]
 struct NetworkState {
     peers: HashMap<Uuid, SeenPeer>,
-    connected: HashSet<Uuid>,
+    confirmed: HashSet<Uuid>,
 }
 
 struct SeenPeer {
@@ -112,8 +112,21 @@ pub async fn run(config: AppConfig) -> Result<()> {
             continue;
         }
         if target.starts_with("/api/disconnect?") {
-            let response = disconnect_device(target, &network)?;
-            respond_json(&mut stream, 200, &response).await?;
+            let response = disconnect_device(target, &config, &network).await;
+            match response {
+                Ok(message) => respond_json(&mut stream, 200, &message).await?,
+                Err(error) => {
+                    respond_json(
+                        &mut stream,
+                        409,
+                        &ApiMessage {
+                            ok: false,
+                            message: error.to_string(),
+                        },
+                    )
+                    .await?;
+                }
+            }
             continue;
         }
 
@@ -186,7 +199,7 @@ fn start_discovery(own_id: Uuid, state: Arc<Mutex<NetworkState>>) {
                             .filter(|(_, seen)| now.duration_since(seen.last_seen) < ONLINE_WINDOW)
                             .map(|(id, _)| *id)
                             .collect::<HashSet<_>>();
-                        state.connected.retain(|id| online.contains(id));
+                        state.confirmed.retain(|id| online.contains(id));
                     }
                 }
                 Err(error) => eprintln!("设置页发现局域网设备失败: {error:#}"),
@@ -204,18 +217,41 @@ fn network_snapshot(
         .lock()
         .map_err(|_| anyhow::anyhow!("设备状态锁已损坏"))?;
     let now = Instant::now();
+    let paired = config.paired_devices.list()?;
+    let paired_ids = paired
+        .iter()
+        .map(|device| device.id)
+        .collect::<HashSet<_>>();
     let mut devices = state
         .peers
         .iter()
-        .map(|(id, seen)| DeviceView {
-            id: *id,
-            name: seen.peer.name.clone(),
-            emoji: seen.peer.emoji.clone(),
-            address: seen.peer.addr.to_string(),
-            online: now.duration_since(seen.last_seen) < ONLINE_WINDOW,
-            connected: state.connected.contains(id),
+        .map(|(id, seen)| {
+            let online = now.duration_since(seen.last_seen) < ONLINE_WINDOW;
+            DeviceView {
+                id: *id,
+                name: seen.peer.name.clone(),
+                emoji: seen.peer.emoji.clone(),
+                address: seen.peer.addr.to_string(),
+                online,
+                connected: online
+                    && paired_ids.contains(id)
+                    && (seen.peer.connected_devices.contains(&config.identity.id)
+                        || state.confirmed.contains(id)),
+            }
         })
         .collect::<Vec<_>>();
+    for device in paired {
+        if !state.peers.contains_key(&device.id) {
+            devices.push(DeviceView {
+                id: device.id,
+                name: device.name,
+                emoji: device.emoji,
+                address: String::new(),
+                online: false,
+                connected: false,
+            });
+        }
+    }
     devices.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.name.cmp(&b.name)));
     Ok(NetworkSnapshot {
         local: LocalDevice {
@@ -244,11 +280,16 @@ async fn connect_device(
         }
         seen.peer.clone()
     };
-    ping_peer(peer.addr, &config.identity).await?;
+    set_peer_connection(peer.addr, &config.identity, true).await?;
+    config.paired_devices.add(PairedDevice::new(
+        peer.id,
+        peer.name.clone(),
+        peer.emoji.clone(),
+    ))?;
     network
         .lock()
         .map_err(|_| anyhow::anyhow!("设备状态锁已损坏"))?
-        .connected
+        .confirmed
         .insert(id);
     Ok(ApiMessage {
         ok: true,
@@ -256,16 +297,35 @@ async fn connect_device(
     })
 }
 
-fn disconnect_device(target: &str, network: &Arc<Mutex<NetworkState>>) -> Result<ApiMessage> {
+async fn disconnect_device(
+    target: &str,
+    config: &AppConfig,
+    network: &Arc<Mutex<NetworkState>>,
+) -> Result<ApiMessage> {
     let id = parse_device_id(target)?;
+    let peer = {
+        let state = network
+            .lock()
+            .map_err(|_| anyhow::anyhow!("设备状态锁已损坏"))?;
+        let seen = state
+            .peers
+            .get(&id)
+            .context("设备已离线，无法同步断开状态")?;
+        if seen.last_seen.elapsed() >= ONLINE_WINDOW {
+            bail!("设备已离线，无法同步断开状态");
+        }
+        seen.peer.clone()
+    };
+    set_peer_connection(peer.addr, &config.identity, false).await?;
+    config.paired_devices.remove(id)?;
     network
         .lock()
         .map_err(|_| anyhow::anyhow!("设备状态锁已损坏"))?
-        .connected
+        .confirmed
         .remove(&id);
     Ok(ApiMessage {
         ok: true,
-        message: "已断开可视连接".into(),
+        message: format!("已断开 {}", peer.name),
     })
 }
 
@@ -506,9 +566,9 @@ const SETTINGS_PAGE: &str = r##"<!doctype html>
         </div>
         <label class="field">文件传输端口<input name="port" type="number" min="1" max="65535" value="__PORT__" required></label>
         <label class="field">接收策略<select name="policy"><option value="confirm"__CONFIRM_SELECTED__>未知设备需要确认</option><option value="trusted-only"__TRUSTED_SELECTED__>仅可信设备</option><option value="accept-all"__ALL_SELECTED__>接受所有设备</option></select></label>
-        <label class="switch"><input name="clipboard" type="checkbox" value="on"__CLIPBOARD_CHECKED__><span>自动同步文本以及复制的文件和目录</span></label>
+        <label class="switch"><input name="clipboard" type="checkbox" value="on"__CLIPBOARD_CHECKED__><span>自动同步文本、截图以及复制的文件和目录</span></label>
         <button class="save" type="submit">保存并重启服务</button>
-        <p class="note">设备连接视图只反映当前局域网可达性。文件类型不受限制；符号链接和特殊设备文件除外。</p>
+        <p class="note">连接关系会在双方设备中保存 7 天，期间离线后再次上线会自动连接；到期后需重新拖动连接。文件类型不受限制；符号链接和特殊设备文件除外。</p>
       </form>
     </aside>
   </div>

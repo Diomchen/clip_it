@@ -4,6 +4,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::protocol::TRANSFER_PORT;
+
+const PAIRED_DEVICE_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Identity {
@@ -30,6 +33,7 @@ pub struct AppConfig {
     pub download_dir: PathBuf,
     pub settings: Settings,
     pub trusted_devices: TrustedDevices,
+    pub paired_devices: PairedDevices,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,6 +82,27 @@ pub struct TrustedDevice {
 pub struct TrustedDevices {
     path: Arc<PathBuf>,
     entries: Arc<Mutex<BTreeMap<Uuid, String>>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairedDevice {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default = "crate::protocol::default_device_emoji")]
+    pub emoji: String,
+    #[serde(default)]
+    expires_at_millis: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PairedDevices {
+    path: Arc<PathBuf>,
+    access: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PairedDevicesFile {
+    devices: Vec<PairedDevice>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -147,6 +172,7 @@ impl AppConfig {
             })
             .context("无法确定接收目录")?;
         let trusted_devices = TrustedDevices::load(config_dir.join("trusted-devices.json"))?;
+        let paired_devices = PairedDevices::load(config_dir.join("paired-devices.json"))?;
 
         Ok(Self {
             config_dir,
@@ -155,6 +181,7 @@ impl AppConfig {
             download_dir,
             settings,
             trusted_devices,
+            paired_devices,
         })
     }
 
@@ -174,6 +201,122 @@ impl AppConfig {
         )
         .context("保存 ClipIt 设置失败")
     }
+}
+
+impl PairedDevices {
+    pub(crate) fn load(path: PathBuf) -> Result<Self> {
+        let store = Self {
+            path: Arc::new(path),
+            access: Arc::new(Mutex::new(())),
+        };
+        store.read_entries()?;
+        Ok(store)
+    }
+
+    pub fn list(&self) -> Result<Vec<PairedDevice>> {
+        let _access = self
+            .access
+            .lock()
+            .map_err(|_| anyhow::anyhow!("已连接设备列表锁已损坏"))?;
+        let mut entries = self.read_entries()?;
+        let before = entries.len();
+        let now = unix_millis();
+        let mut migrated = false;
+        for device in entries.values_mut() {
+            if device.expires_at_millis == 0 {
+                device.expires_at_millis = default_pair_expiry_millis();
+                migrated = true;
+            }
+        }
+        entries.retain(|_, device| device.expires_at_millis > now);
+        if migrated || entries.len() != before {
+            self.save(&entries)?;
+        }
+        Ok(entries.into_values().collect())
+    }
+
+    pub fn add(&self, mut device: PairedDevice) -> Result<()> {
+        let _access = self
+            .access
+            .lock()
+            .map_err(|_| anyhow::anyhow!("已连接设备列表锁已损坏"))?;
+        let mut entries = self.read_entries()?;
+        device.expires_at_millis = default_pair_expiry_millis();
+        entries.insert(device.id, device);
+        self.save(&entries)
+    }
+
+    pub fn remove(&self, id: Uuid) -> Result<bool> {
+        let _access = self
+            .access
+            .lock()
+            .map_err(|_| anyhow::anyhow!("已连接设备列表锁已损坏"))?;
+        let mut entries = self.read_entries()?;
+        let removed = entries.remove(&id).is_some();
+        if removed {
+            self.save(&entries)?;
+        }
+        Ok(removed)
+    }
+
+    fn read_entries(&self) -> Result<BTreeMap<Uuid, PairedDevice>> {
+        if !self.path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        if fs::metadata(self.path.as_ref())?.len() > 1024 * 1024 {
+            bail!("已连接设备列表过大");
+        }
+        let bytes = fs::read(self.path.as_ref()).context("读取已连接设备列表失败")?;
+        let stored: PairedDevicesFile =
+            serde_json::from_slice(&bytes).context("已连接设备列表格式错误")?;
+        Ok(stored
+            .devices
+            .into_iter()
+            .map(|device| (device.id, device))
+            .collect())
+    }
+
+    fn save(&self, entries: &BTreeMap<Uuid, PairedDevice>) -> Result<()> {
+        let parent = self.path.parent().context("已连接设备列表路径无效")?;
+        fs::create_dir_all(parent).context("创建 ClipIt 配置目录失败")?;
+        let stored = PairedDevicesFile {
+            devices: entries.values().cloned().collect(),
+        };
+        let bytes = serde_json::to_vec_pretty(&stored)?;
+        if bytes.len() > 1024 * 1024 {
+            bail!("已连接设备列表过大");
+        }
+        fs::write(self.path.as_ref(), bytes).context("保存已连接设备列表失败")
+    }
+}
+
+impl PairedDevice {
+    pub fn new(id: Uuid, name: String, emoji: String) -> Self {
+        Self {
+            id,
+            name,
+            emoji,
+            expires_at_millis: default_pair_expiry_millis(),
+        }
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn default_pair_expiry_millis() -> u64 {
+    unix_millis().saturating_add(
+        PAIRED_DEVICE_RETENTION
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    )
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {
@@ -325,6 +468,48 @@ mod tests {
         assert!(reloaded.contains(id).unwrap());
         assert!(reloaded.remove(id).unwrap());
         assert!(!reloaded.remove(id).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn paired_devices_round_trip_and_observe_external_updates() {
+        let root = std::env::temp_dir().join(format!("clip-it-pair-test-{}", Uuid::new_v4()));
+        let path = root.join("paired-devices.json");
+        let first = PairedDevices::load(path.clone()).unwrap();
+        let second = PairedDevices::load(path.clone()).unwrap();
+        let id = Uuid::new_v4();
+
+        first
+            .add(PairedDevice::new(id, "客厅 Mac".into(), "🍎".into()))
+            .unwrap();
+        assert!(second.list().unwrap().iter().any(|device| device.id == id));
+        assert_eq!(second.list().unwrap()[0].emoji, "🍎");
+
+        second.remove(id).unwrap();
+        assert!(!first.list().unwrap().iter().any(|device| device.id == id));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn paired_devices_expire_after_retention_window() {
+        let root = std::env::temp_dir().join(format!("clip-it-expiry-test-{}", Uuid::new_v4()));
+        let path = root.join("paired-devices.json");
+        let store = PairedDevices::load(path).unwrap();
+        let id = Uuid::new_v4();
+        store
+            .save(&BTreeMap::from([(
+                id,
+                PairedDevice {
+                    id,
+                    name: "过期设备".into(),
+                    emoji: "⌛".into(),
+                    expires_at_millis: unix_millis().saturating_sub(1),
+                },
+            )]))
+            .unwrap();
+
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.read_entries().unwrap().is_empty());
         let _ = fs::remove_dir_all(root);
     }
 
