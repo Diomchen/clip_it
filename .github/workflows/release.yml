@@ -42,6 +42,9 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: checks
     runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,7 +57,16 @@ jobs:
         run: cargo test --all-targets --all-features --locked
       - name: Build Windows package
         shell: pwsh
-        run: ./scripts/package-windows.ps1
+        run: |
+          if ($env:WINDOWS_CERTIFICATE_BASE64) {
+            $CertificatePath = Join-Path $env:RUNNER_TEMP "clip-it-signing.pfx"
+            [IO.File]::WriteAllBytes(
+              $CertificatePath,
+              [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+            )
+            $env:WINDOWS_CERTIFICATE_PATH = $CertificatePath
+          }
+          ./scripts/package-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
@@ -123,6 +135,7 @@ jobs:
           name: macos-universal
           path: |
             dist/*.dmg
+            dist/*.zip
             dist/*.sha256
           if-no-files-found: error
 
@@ -134,10 +147,36 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+      - name: Generate and sign update manifest
+        shell: bash
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$UPDATE_SIGNING_PRIVATE_KEY" ]]; then
+            echo "UPDATE_SIGNING_PRIVATE_KEY is required for tagged releases" >&2
+            exit 1
+          fi
+          python3 scripts/generate-update-manifest.py \
+            --dist release-assets \
+            --version "$GITHUB_REF_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output release-assets/update-manifest.json
+          SIGNING_DIR="$(mktemp -d)"
+          trap 'rm -rf "$SIGNING_DIR"' EXIT
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_PRIVATE_KEY" > "$SIGNING_DIR/private.pem"
+          openssl pkeyutl -sign -rawin \
+            -inkey "$SIGNING_DIR/private.pem" \
+            -in release-assets/update-manifest.json \
+            -out "$SIGNING_DIR/update-manifest.sig.bin"
+          base64 -w 0 "$SIGNING_DIR/update-manifest.sig.bin" \
+            > release-assets/update-manifest.sig
+          printf '\n' >> release-assets/update-manifest.sig
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

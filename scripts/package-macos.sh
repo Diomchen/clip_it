@@ -75,6 +75,11 @@ plutil -lint "$CONTENTS_DIR/Info.plist"
 codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" "$APP_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
+ZIP_PATH="$DIST_DIR/ClipIt-${VERSION}-macos-${PACKAGE_ARCH}.zip"
+rm -f "$ZIP_PATH"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+shasum -a 256 "$ZIP_PATH" > "$ZIP_PATH.sha256"
+
 ln -s /Applications "$WORK_DIR/dmg/Applications"
 cat > "$WORK_DIR/dmg/安装说明.txt" <<'EOF'
 ClipIt 安装说明
@@ -103,4 +108,4 @@ hdiutil create \
     "$DMG_PATH"
 
 shasum -a 256 "$DMG_PATH" > "$DMG_PATH.sha256"
-echo "已生成 $DMG_PATH"
+echo "已生成 $DMG_PATH 和 $ZIP_PATH"

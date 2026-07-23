@@ -1,20 +1,25 @@
 [package]
 name = "clip-it"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 description = "Small, fast context-menu LAN file transfer"
 license = "MIT"
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 hostname = "0.4"
+semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+ureq = { version = "2.12", default-features = false, features = ["json", "native-tls"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 walkdir = "2.5"
 
@@ -22,6 +27,10 @@ walkdir = "2.5"
 clipboard-rs = { version = "0.3.5", default-features = false, features = ["image"] }
 tao = { version = "0.35.3", default-features = false }
 tray-icon = { version = "0.24.1", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
+windows-core = "0.59"
 
 [profile.release]
 codegen-units = 1

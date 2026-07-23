@@ -9,6 +9,9 @@ mod settings_ui;
 mod transfer;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray;
+mod update;
+#[cfg(target_os = "windows")]
+mod windows_shell;
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -83,6 +86,17 @@ enum Command {
         #[command(subcommand)]
         action: StartupAction,
     },
+    /// Check for or install signed ClipIt updates.
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+    #[cfg(target_os = "windows")]
+    #[command(hide = true)]
+    ShellServer {
+        #[arg(hide = true, allow_hyphen_values = true)]
+        com_arguments: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -116,6 +130,15 @@ enum StartupAction {
     Install,
     Remove,
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+enum UpdateAction {
+    Check,
+    Install {
+        #[arg(long, hide = true)]
+        parent_pid: Option<u32>,
+    },
 }
 
 #[tokio::main]
@@ -174,6 +197,21 @@ async fn main() -> Result<()> {
         Some(Command::Trust { action }) => manage_trust(&config, action)?,
         Some(Command::Configure) => settings_ui::run(config).await?,
         Some(Command::Startup { action }) => manage_startup(action)?,
+        Some(Command::Update { action }) => match action {
+            UpdateAction::Check => match update::check_for_update()? {
+                Some(update) => println!("发现新版本 v{}", update.version),
+                None => println!("当前已是最新版本 v{}", env!("CARGO_PKG_VERSION")),
+            },
+            UpdateAction::Install { parent_pid } => {
+                let version = update::install_latest(&config.config_dir, parent_pid)?;
+                println!("已验证 v{version}，更新将在 ClipIt 退出后安装");
+            }
+        },
+        #[cfg(target_os = "windows")]
+        Some(Command::ShellServer { com_arguments }) => {
+            let _ = com_arguments;
+            windows_shell::run_server()?;
+        }
     }
 
     Ok(())

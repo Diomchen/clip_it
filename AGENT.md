@@ -16,8 +16,10 @@ and ports.
   login startup, loopback settings, and automatic text/file clipboard sync.
 - Protocol v4 adds resumable 32 MiB chunks, four parallel transfer streams,
   a LAN benchmark command, and a live device-bubble settings view.
-- The next milestone is signed updates and native Windows 11 top-level menu
-  integration; do not introduce a bundled browser runtime.
+- Version 0.5 adds signed automatic updates and a native Windows 11 top-level
+  `IExplorerCommand` menu; do not introduce a bundled browser runtime.
+- The planned milestone list is complete. Future priorities should be driven by
+  explicit product requirements rather than inferred here.
 
 ## Technical Direction
 

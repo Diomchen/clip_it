@@ -14,10 +14,36 @@ use anyhow::bail;
 #[cfg(target_os = "windows")]
 pub fn install() -> Result<()> {
     let executable = env::current_exe().context("无法确定 ClipIt 可执行文件路径")?;
-    let command = format!("\"{}\" pick \"%1\"", executable.display());
+    let clsid_key = format!(
+        r"HKCU\Software\Classes\CLSID\{}",
+        crate::windows_shell::SHELL_COMMAND_CLSID_TEXT
+    );
+    let server_command = format!("\"{}\" shell-server", executable.display());
+    reg(&[
+        "add",
+        &clsid_key,
+        "/ve",
+        "/d",
+        "ClipIt Explorer Command",
+        "/f",
+    ])?;
+    reg(&[
+        "add",
+        &format!(r"{clsid_key}\LocalServer32"),
+        "/ve",
+        "/d",
+        &server_command,
+        "/f",
+    ])?;
+
     for class in ["*", "Directory"] {
         let key = format!(r"HKCU\Software\Classes\{class}\shell\ClipIt");
-        reg(&["add", &key, "/ve", "/d", "使用 ClipIt 发送", "/f"])?;
+        // Remove the pre-v0.5 legacy command before registering the Windows 11
+        // IExplorerCommand handler. Ignore a missing key to keep this idempotent.
+        let _ = Command::new("reg")
+            .args(["delete", &format!(r"{key}\command"), "/f"])
+            .status();
+        reg(&["add", &key, "/v", "MUIVerb", "/d", "使用 ClipIt 发送", "/f"])?;
         reg(&[
             "add",
             &key,
@@ -29,14 +55,17 @@ pub fn install() -> Result<()> {
         ])?;
         reg(&[
             "add",
-            &format!(r"{key}\command"),
-            "/ve",
+            &key,
+            "/v",
+            "ExplorerCommandHandler",
             "/d",
-            &command,
+            crate::windows_shell::SHELL_COMMAND_CLSID_TEXT,
             "/f",
         ])?;
+        reg(&["add", &key, "/v", "MultiSelectModel", "/d", "Player", "/f"])?;
     }
-    println!("已安装 Windows 资源管理器右键菜单。无需管理员权限。");
+    refresh_windows_shell();
+    println!("已安装 Windows 11 资源管理器顶层右键菜单。无需管理员权限。");
     Ok(())
 }
 
@@ -49,8 +78,26 @@ pub fn remove() -> Result<()> {
             eprintln!("右键菜单项不存在或删除失败: {key}");
         }
     }
+    let clsid_key = format!(
+        r"HKCU\Software\Classes\CLSID\{}",
+        crate::windows_shell::SHELL_COMMAND_CLSID_TEXT
+    );
+    let status = Command::new("reg")
+        .args(["delete", &clsid_key, "/f"])
+        .status()?;
+    if !status.success() {
+        eprintln!("ClipIt COM 注册项不存在或删除失败: {clsid_key}");
+    }
+    refresh_windows_shell();
     println!("已移除 Windows 资源管理器右键菜单。");
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn refresh_windows_shell() {
+    use windows::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+
+    unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
 }
 
 #[cfg(target_os = "windows")]

@@ -23,12 +23,19 @@ mod desktop {
         menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
 
-    use crate::{config::AppConfig, integration, protocol::TRAY_INSTANCE_PORT};
+    use crate::{
+        config::AppConfig,
+        integration,
+        protocol::TRAY_INSTANCE_PORT,
+        update::{self, UpdateInfo},
+    };
 
     #[derive(Debug)]
     enum UserEvent {
         Menu(MenuEvent),
         SettingsFinished,
+        UpdateChecked(Result<Option<UpdateInfo>, String>),
+        UpdateInstalled(Result<String, String>),
     }
 
     pub(super) fn run(config: AppConfig) -> Result<()> {
@@ -42,12 +49,14 @@ mod desktop {
             let _ = proxy.send_event(UserEvent::Menu(event));
         }));
         let settings_proxy = event_loop.create_proxy();
+        let update_proxy = event_loop.create_proxy();
 
         let menu = Menu::new();
         let status = MenuItem::new(status_text(&config, true), false, None);
         let open_downloads = MenuItem::new("打开接收目录", true, None);
         let restart = MenuItem::new("重启后台服务", true, None);
         let configure = MenuItem::new("设置…", true, None);
+        let update_item = MenuItem::new("正在检查更新…", false, None);
         let startup =
             CheckMenuItem::new("登录时自动启动", true, integration::startup_enabled(), None);
         let quit = MenuItem::new("退出 ClipIt", true, None);
@@ -57,6 +66,7 @@ mod desktop {
             &open_downloads,
             &restart,
             &configure,
+            &update_item,
             &startup,
             &PredefinedMenuItem::separator(),
             &quit,
@@ -65,6 +75,8 @@ mod desktop {
         let mut child = spawn_service(&config)?;
         let mut current_config = config;
         let mut tray_icon: Option<TrayIcon> = None;
+        let mut available_update: Option<UpdateInfo> = None;
+        let mut update_busy = true;
         let mut next_health_check = Instant::now() + Duration::from_secs(1);
         let instance_guard = Some(instance_guard);
 
@@ -74,6 +86,7 @@ mod desktop {
 
             match event {
                 Event::NewEvents(StartCause::Init) => {
+                    check_for_update(update_proxy.clone());
                     match TrayIconBuilder::new()
                         .with_menu(Box::new(menu.clone()))
                         .with_tooltip("ClipIt - 局域网剪贴板与文件同步")
@@ -99,6 +112,16 @@ mod desktop {
                         restart_child(&mut child, &current_config, &status);
                     } else if event.id == *configure.id() {
                         spawn_settings(&current_config, settings_proxy.clone());
+                    } else if event.id == *update_item.id() && !update_busy {
+                        update_busy = true;
+                        update_item.set_enabled(false);
+                        if let Some(update) = &available_update {
+                            update_item.set_text(format!("正在安装 v{}…", update.version));
+                            install_update(current_config.config_dir.clone(), update_proxy.clone());
+                        } else {
+                            update_item.set_text("正在检查更新…");
+                            check_for_update(update_proxy.clone());
+                        }
                     } else if event.id == *open_downloads.id() {
                         if let Err(error) = open_path(&current_config.download_dir) {
                             eprintln!("打开接收目录失败: {error:#}");
@@ -129,9 +152,60 @@ mod desktop {
                         Err(error) => eprintln!("重新加载 ClipIt 设置失败: {error:#}"),
                     }
                 }
+                Event::UserEvent(UserEvent::UpdateChecked(result)) => {
+                    update_busy = false;
+                    update_item.set_enabled(true);
+                    match result {
+                        Ok(Some(info)) => {
+                            update_item.set_text(format!("安装更新 v{}", info.version));
+                            available_update = Some(info);
+                        }
+                        Ok(None) => {
+                            update_item.set_text(format!(
+                                "已是最新版本 v{}（点此检查）",
+                                env!("CARGO_PKG_VERSION")
+                            ));
+                            available_update = None;
+                        }
+                        Err(error) => {
+                            eprintln!("检查 ClipIt 更新失败: {error}");
+                            update_item.set_text("检查更新失败（点此重试）");
+                            available_update = None;
+                        }
+                    }
+                }
+                Event::UserEvent(UserEvent::UpdateInstalled(result)) => match result {
+                    Ok(version) => {
+                        update_item.set_text(format!("正在重启到 v{version}…"));
+                        stop_child(&mut child);
+                        tray_icon.take();
+                        *control_flow = ControlFlow::Exit;
+                    }
+                    Err(error) => {
+                        eprintln!("安装 ClipIt 更新失败: {error}");
+                        update_busy = false;
+                        update_item.set_text("安装更新失败（点此重试）");
+                        update_item.set_enabled(true);
+                    }
+                },
                 Event::LoopDestroyed => stop_child(&mut child),
                 _ => {}
             }
+        });
+    }
+
+    fn check_for_update(proxy: EventLoopProxy<UserEvent>) {
+        std::thread::spawn(move || {
+            let result = update::check_for_update().map_err(|error| format!("{error:#}"));
+            let _ = proxy.send_event(UserEvent::UpdateChecked(result));
+        });
+    }
+
+    fn install_update(config_dir: std::path::PathBuf, proxy: EventLoopProxy<UserEvent>) {
+        std::thread::spawn(move || {
+            let result =
+                update::install_latest(&config_dir, None).map_err(|error| format!("{error:#}"));
+            let _ = proxy.send_event(UserEvent::UpdateInstalled(result));
         });
     }
 

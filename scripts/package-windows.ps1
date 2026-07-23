@@ -15,6 +15,26 @@ $PackageName = "ClipIt-$Version-windows-x86_64"
 $PackageDir = Join-Path $DistDir $PackageName
 $ExePath = Join-Path $RootDir "target/$Target/release/clip-it.exe"
 
+if ($env:WINDOWS_CERTIFICATE_PATH) {
+    if (-not (Test-Path -LiteralPath $env:WINDOWS_CERTIFICATE_PATH)) {
+        throw "WINDOWS_CERTIFICATE_PATH does not exist"
+    }
+    $SignTool = (Get-Command signtool.exe -ErrorAction Stop).Source
+    $SignArgs = @(
+        "sign", "/fd", "SHA256", "/td", "SHA256",
+        "/tr", "http://timestamp.digicert.com",
+        "/f", $env:WINDOWS_CERTIFICATE_PATH
+    )
+    if ($env:WINDOWS_CERTIFICATE_PASSWORD) {
+        $SignArgs += @("/p", $env:WINDOWS_CERTIFICATE_PASSWORD)
+    }
+    $SignArgs += $ExePath
+    & $SignTool @SignArgs
+    if ($LASTEXITCODE -ne 0) { throw "Windows code signing failed" }
+    & $SignTool verify /pa $ExePath
+    if ($LASTEXITCODE -ne 0) { throw "Windows signature verification failed" }
+}
+
 New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 Copy-Item $ExePath (Join-Path $PackageDir "clip-it.exe") -Force
 Copy-Item (Join-Path $RootDir "README.md") (Join-Path $PackageDir "README.md") -Force
@@ -27,8 +47,8 @@ ClipIt $Version for Windows
 2. Double-click clip-it.exe.
 3. ClipIt installs the Explorer context menu, enables login startup, and runs
    in the system tray automatically.
-4. Right-click a file or folder and choose "Send with ClipIt". On Windows 11,
-   the item may be under "Show more options".
+4. Right-click a file or folder and choose "Send with ClipIt" directly from
+   the Windows 11 top-level context menu.
 
 Run `clip-it.exe integrate remove` and `clip-it.exe startup remove` to uninstall
 the context menu and login startup entry.
